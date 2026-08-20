@@ -5,7 +5,7 @@
 | 项目         | 内容 |
 | ------------ | ---- |
 | **文档标题** | Stardew Agent 调研资料索引 |
-| **文档版本** | v0.2 |
+| **文档版本** | v0.4 |
 | **创建日期** | 2026-08-23 |
 | **更新日期** | 2026-08-23 |
 | **文档作者** | 项目维护者 |
@@ -23,57 +23,56 @@
 
 ## 目标
 
-本目录用于记录 Stardew Agent 正式开发前的实现型调研，重点回答以下问题：
+本目录用于记录 Stardew Agent 正式开发前的资料型调研，重点记录以下内容：
 
-- Agent 如何与 Stardew Valley 建立稳定、可验证的通信链路；
-- 游戏状态和可执行动作应该如何建模；
-- 现有项目分别解决了哪些问题，哪些设计可以复用；
-- LLM、确定性执行器、寻路算法和强化学习应该如何分工；
-- 如何把这些结论收敛成一个可以逐步验证的 MVP。
+- 现有项目如何与 Stardew Valley 通信；
+- 不同项目如何表示游戏状态、动作和结果；
+- 动作执行、寻路、任务循环和评测在参考项目中的实现形态；
+- LLM、规则代码、搜索算法和强化学习在参考项目中的职责；
+- 参考项目的开发阶段、依赖关系和已知限制。
 
-这些文档面向刚加入项目的读者。每篇报告应直接说明当前发现、当前建议、约束和待验证问题，不要求读者了解此前的讨论过程。
+这些文档面向刚加入项目的读者。每篇报告只陈述资料来源、事实观察、横向差异、已知限制和待验证事实，不替 Stardew Agent 选择技术方案，也不规定实现步骤。
 
 ## 阅读顺序
 
 文件名不使用数字前缀，阅读顺序在这里统一维护：
 
-1. `communication-architecture.md`：先理解游戏、Mod、外部 Agent 和 LLM 之间的分层通信链路。
-2. `existing-projects.md`：再比较参考项目的架构、状态、动作、通信和评测方式。
-3. `observation-action-contract.md`：根据前两篇的结论定义自己的 Observation、Action 和结果协议。
-4. `action-execution-and-pathfinding.md`：研究动作执行、寻路、动画等待、失败重试和结果校验。
-5. `agent-loop-and-evaluation.md`：定义 Observe、Plan、Act、Verify 闭环以及任务评测指标。
-6. `llm-and-rl-boundary.md`：确定 LLM、规则代码和强化学习的职责边界。
-7. `mvp-roadmap.md`：将调研结论整理成分阶段、可验收的实现路线。
+1. [`communication-architecture.md`](communication-architecture.md)：查看参考项目中的游戏进程、Mod 和外部进程通信方式。
+2. [`existing-projects.md`](existing-projects.md)：查看各参考项目的组件、接口和运行边界。
+3. [`observation-action-contract.md`](observation-action-contract.md)：比较不同项目中的 Observation、Action 和 Result 表达方式。
+4. [`action-execution-and-pathfinding.md`](action-execution-and-pathfinding.md)：查看动作队列、寻路、等待、校验和失败处理的实际实现。
+5. [`agent-loop-and-evaluation.md`](agent-loop-and-evaluation.md)：查看任务循环、任务配置、轨迹记录和评测指标的实际实现。
+6. [`llm-and-rl-boundary.md`](llm-and-rl-boundary.md)：查看参考项目中 LLM、规则、搜索和 RL 的使用边界与实验条件。
+7. [`development-stage-observations.md`](development-stage-observations.md)：查看参考项目公开资料中的开发阶段和依赖，不形成 Stardew Agent 路线。
 
-前两篇是架构调研的入口；第三、第四篇会直接影响第一版 Mod 的接口设计；最后三篇用于控制项目范围和后续实验节奏。
+前两篇提供项目和通信背景；第三至第六篇分别记录状态、动作、执行、评测和模型资料；最后一篇只整理参考项目公开的阶段性信息。
 
 ## 报告清单
 
-| 文件 | 主要问题 | 预期产出 | 状态 |
+| 文件 | 调研主题 | 内容范围 | 状态 |
 | ---- | -------- | -------- | ---- |
-| `communication-architecture.md` | 游戏进程和外部 Agent 如何通信？MCP 在哪一层？ | 通信分层、时序图、协议对比和 MVP 推荐方案 | 待编写 |
-| `existing-projects.md` | StarDojo、StardewMCP、BotFramework、Farmtronics 等项目分别做了什么？ | 项目对比矩阵、可复用设计、差异和风险 | 待编写 |
-| `observation-action-contract.md` | Agent 看见什么、能做什么、如何确认动作结果？ | Observation、Action、Result 的初版数据契约 | 待编写 |
-| `action-execution-and-pathfinding.md` | 高层动作如何落到底层游戏操作？ | 执行器、寻路、冷却、重试和校验方案 | 待编写 |
-| `agent-loop-and-evaluation.md` | 如何稳定运行和衡量一个 Agent？ | Agent 闭环、任务集、轨迹记录和评测指标 | 待编写 |
-| `llm-and-rl-boundary.md` | LLM 和强化学习分别应该解决什么问题？ | 分层职责、训练边界和实验建议 | 待编写 |
-| `mvp-roadmap.md` | 调研结果如何转成工程步骤？ | 分阶段目标、验收标准和依赖关系 | 待编写 |
+| [`communication-architecture.md`](communication-architecture.md) | 游戏通信实现 | StardewMCP、StarDojo 的链路、协议和传输特征 | 已完成 |
+| [`existing-projects.md`](existing-projects.md) | 参考项目实现 | 组件、运行方式、接口和限制对比 | 已完成 |
+| [`observation-action-contract.md`](observation-action-contract.md) | 状态与动作表达 | Observation、Action、Result 的字段和粒度差异 | 已完成 |
+| [`action-execution-and-pathfinding.md`](action-execution-and-pathfinding.md) | 动作执行实现 | 执行队列、寻路、等待、校验和失败处理 | 已完成 |
+| [`agent-loop-and-evaluation.md`](agent-loop-and-evaluation.md) | 任务与评测实现 | 任务模型、轨迹、指标和复现条件 | 已完成 |
+| [`llm-and-rl-boundary.md`](llm-and-rl-boundary.md) | 模型与策略实验 | LLM、规则、搜索和 RL 的实际使用方式 | 已完成 |
+| [`development-stage-observations.md`](development-stage-observations.md) | 阶段性信息 | 参考项目公开资料中的开发阶段、依赖和未解决问题 | 已完成 |
 
 ## 调研方法
 
 每篇报告按以下顺序组织内容：
 
-1. **调研问题**：明确本篇要解决的工程问题和非目标。
+1. **调研问题**：明确本篇记录的事实范围。
 2. **资料范围**：列出参考项目、分支、提交号、关键文件和官方文档。
 3. **事实观察**：只记录可以从代码、配置、运行结果或文档中直接验证的内容。
-4. **方案比较**：说明各方案的优点、缺点、适用条件和已知风险。
-5. **当前建议**：给出 Stardew Agent 当前采用或暂不采用的方案，并说明依据。
-6. **待验证问题**：列出需要通过编译、运行游戏或实验才能确认的内容。
-7. **对实现的影响**：明确下一步应该创建哪些接口、测试或实验。
+4. **方案比较**：并列说明不同实现的特征、优点、缺点和适用前提。
+5. **资料限制**：记录资料没有覆盖或无法从源码确认的内容。
+6. **待验证事实**：列出需要通过编译、运行游戏或实验确认的事实，不写实现安排。
 
-报告中应区分“参考项目已经这样做”和“Stardew Agent 建议这样做”。参考项目的实现可以借鉴，但不默认适合直接复制；尤其需要单独检查游戏版本、SMAPI 版本、运行平台、许可证和维护状态。
+报告中应区分“参考项目已经这样做”和“资料无法确认的内容”。不得写“Stardew Agent 建议这样做”、复用清单、技术选择、实施步骤或验收标准。参考项目的实现不代表 Stardew Agent 的设计。
 
-涉及流程、组件关系或交互时优先使用 Mermaid。涉及方案选择时使用对比表，并在结尾给出明确推荐，不只罗列资料。
+涉及流程、组件关系或交互时优先使用 Mermaid。涉及方案差异时使用对比表，只记录资料中的差异，不给出推荐。
 
 ## 参考项目
 
@@ -100,6 +99,6 @@
 - 外部参考资料必须使用公开网页链接或项目名称；需要定位到源码时使用 GitHub 的文件链接、分支或提交链接。
 - 参考项目发生更新时，在报告中记录实际使用的版本、分支或提交号，不只记录仓库地址。
 - 不要在已提交文档中写入本地工作目录、绝对路径、`file://` 链接或其他只在本地有效的路径。
-- 主报告只保留仍然有效的当前结论；完整的否决方案和过程性讨论放到单独的方案对比或外部 Journal。
+- 报告正文只保留有来源的事实、明确标注的分析和资料限制；不写项目当前选择或否决方案。
 - 每篇报告完成后更新本 README 的“报告清单”状态和更新时间。
-- 任何结论如果尚未在本地编译、启动游戏或实验中验证，应明确标记为“待验证”。
+- 任何事实如果尚未通过本地编译、启动游戏或实验验证，应明确标记为“待验证”，不得把它写成实现结论。
