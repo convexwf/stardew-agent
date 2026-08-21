@@ -1,0 +1,21 @@
+[package]
+name = "stardew-cli"
+version = "0.1.0"
+edition = "2021"
+description = "CLI and file bridge demo for Stardew Agent"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[[bin]]
+name = "stardew-cli"
+path = "src/main.rs"
+
+[[bin]]
+name = "fake-mod"
+path = "src/bin/fake-mod.rs"

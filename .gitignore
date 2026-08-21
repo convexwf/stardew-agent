@@ -1,0 +1,6 @@
+/cli/target/
+/_releases/
+/smapi-mod/bin/
+/smapi-mod/obj/
+/smapi-mod/bridge/
+/smapi-mod/config.json

@@ -1,0 +1,10 @@
+{
+  "Name": "Stardew Agent Bridge",
+  "Author": "Stardew Agent",
+  "Version": "%ProjectVersion%",
+  "Description": "A file bridge between a CLI and Stardew Valley.",
+  "UniqueID": "StardewAgent.Bridge",
+  "EntryDll": "StardewAgentMod.dll",
+  "MinimumApiVersion": "4.0.0",
+  "UpdateKeys": []
+}
