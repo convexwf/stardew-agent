@@ -202,7 +202,7 @@ internal sealed class ModEntry : Mod
         var payload = new SnapshotPayload
         {
             Sequence = ++_snapshotSequence,
-            ModVersion = ModManifest.Version,
+            ModVersion = this.ModManifest.Version.ToString(),
             GameTick = _modTick,
             WorldReady = Context.IsWorldReady,
             Game = Context.IsWorldReady ? new GameInfo
@@ -250,9 +250,4 @@ internal sealed class ModEntry : Mod
             Monitor.Log($"Failed to move {processingPath} to errors: {error.Message}", LogLevel.Warn);
         }
     }
-}
-
-internal static class ModManifest
-{
-    public const string Version = "0.1.0";
 }
