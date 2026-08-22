@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 
 use stardew_cli::{
     bridge::Bridge,
-    protocol::{ActionRequestPayload, Direction},
+    protocol::{ActionRequestPayload, Direction, COMPANION_ID},
 };
 
 #[derive(Debug, Parser)]
@@ -63,7 +63,12 @@ fn run() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&snapshot)?);
         }
         Command::Ping { timeout_ms } => {
-            let result = bridge.send_and_wait(ActionRequestPayload::Ping, timeout_ms)?;
+            let result = bridge.send_and_wait(
+                ActionRequestPayload::Ping {
+                    actor_id: COMPANION_ID.to_owned(),
+                },
+                timeout_ms,
+            )?;
             print_result(&result)?;
         }
         Command::Move {
@@ -73,6 +78,7 @@ fn run() -> Result<()> {
         } => {
             let result = bridge.send_and_wait(
                 ActionRequestPayload::MoveRelative {
+                    actor_id: COMPANION_ID.to_owned(),
                     direction,
                     ticks,
                 },
@@ -87,7 +93,7 @@ fn run() -> Result<()> {
                 if let Some(snapshot) = bridge.latest_snapshot()? {
                     let sequence = snapshot
                         .payload
-                        .get("sequence")
+                        .get("latest_write_sequence")
                         .and_then(serde_json::Value::as_u64);
                     if sequence != last_sequence {
                         println!("{}", serde_json::to_string_pretty(&snapshot)?);

@@ -5,12 +5,12 @@
 | 项目         | 内容 |
 | ------------ | ---- |
 | **文档标题** | CLI 工具系统通信 Demo 技术实现方案 |
-| **文档版本** | v0.4 |
+| **文档版本** | v0.6 |
 | **创建日期** | 2026-08-23 |
-| **更新日期** | 2026-08-23 |
+| **更新日期** | 2026-08-24 |
 | **文档作者** | 项目维护者 |
 | **文档类型** | 技术实现方案 |
-| **参考资料** | [SMAPI Mod 结构](https://wiki.stardewvalley.net/Modding:Modder_Guide/APIs/Mod_structure)、[SMAPI Mod package](https://github.com/Pathoschild/SMAPI/blob/develop/docs/technical/mod-package.md)、[StardewMCP](https://github.com/Hunter-Thompson/stardew-mcp/tree/3ca54bbfc1d446eeb06d822a74c92cd14df82b93) |
+| **参考资料** | [SMAPI Mod 结构](https://wiki.stardewvalley.net/Modding:Modder_Guide/APIs/Mod_structure)、[SMAPI Mod package](https://github.com/Pathoschild/SMAPI/blob/develop/docs/technical/mod-package.md)、[StardewMCP](https://github.com/Hunter-Thompson/stardew-mcp/tree/3ca54bbfc1d446eeb06d822a74c92cd14df82b93)、[StardewValley-MCP](https://github.com/amarisaster/StardewValley-MCP) |
 
 ## 目录
 
@@ -52,7 +52,9 @@ Demo 成功后，可以证明外部 CLI 与游戏 Mod 之间具备以下能力�
 - Mod 能写回命令结果；
 - Mod 能持续写出游戏状态快照；
 - CLI 能读取最新状态；
-- CLI 能发起一个受限的实际人物移动操作，并读取执行结果；
+- CLI 能发起一个受限的 Companion 移动操作，并读取执行结果；
+- Mod 能在游戏内创建一个由可见 NPC 和 shadow farmer 组成的 Companion；
+- Companion 与主农场主保持在同一地图，避免把未验证的后台地图运行当作 Demo 能力；
 - 请求 ID 能将请求和结果关联起来。
 
 ## 当前设计
@@ -89,18 +91,18 @@ flowchart LR
 
     subgraph GAME[SMAPI Mod 与游戏进程]
         E[SMAPI GameLoop 事件]
-        G["游戏运行时状态<br/>玩家、地点、时间、背包等"]
+        G["游戏运行时状态<br/>主农场主、Companion、地点、时间等"]
         P["状态投影<br/>生成最小 snapshot"]
         D[请求领取与校验]
-        X["动作执行器<br/>调用输入/游戏 API"]
+        X["Companion 动作执行器<br/>调用游戏 API"]
     end
 
     C1 -->|move/ping| C2
     C2 -->|写入请求| A
     A -->|Mod 领取| D
-    D -->|move_relative| X
+    D -->|move_relative(actor_id)| X
     D -->|ping 或失败| R
-    X -->|执行动作| G
+    X -->|执行 Companion 动作| G
     E --> P
     P -->|读取| G
     G -->|动作生效后的新状态| P
@@ -117,17 +119,17 @@ flowchart LR
 | --- | --- | --- | --- |
 | 游戏运行时状态 | Stardew Valley | 当前真实的玩家、世界和游戏进度 | CLI 不直接读取，只能通过 Mod 投影获取 |
 | `snapshot` | Mod 从游戏状态读取后生成 | 某一时刻的只读状态快照，可能因写出和轮询存在延迟 | `status` 读取最新一份，`watch` 持续读取变化 |
-| `action.request` | CLI 根据命令参数生成 | 希望 Mod 执行的动作，不代表动作已经成功 | `ping`、`move` 写入 `actions/pending/` |
+| `action.request` | CLI 根据命令参数生成 | 希望 Mod 执行的 Companion 动作，不代表动作已经成功 | `ping`、`move` 写入 `actions/pending/` |
 | `action.result` | Mod 执行动作后生成 | 对某个 `request_id` 的执行结果和观测值 | CLI 等待并读取结果；`move` 读取前后 tile |
 
 因此，CLI 与游戏数据的交互不是“CLI 修改 JSON 就修改了游戏状态”。以 `move` 为例，只有下面的闭环完成后，才算一次有效写操作：
 
 1. CLI 将方向和 tick 数编码为 `action.request`；
 2. Mod 在 `UpdateTicked` 中领取并校验请求；
-3. Mod 通过 SMAPI 输入接口或目标版本对应的游戏 API 对实际玩家施加输入；
-4. 游戏运行时处理碰撞和移动，产生新的玩家位置；
-5. Mod 读取执行前后的玩家 tile，写入 `action.result`；
-6. Mod 后续生成的 `snapshot` 反映新的位置，CLI 读取结果或快照进行确认。
+3. Mod 根据 `actor_id` 找到 Companion，并调用其游戏内动作执行器；
+4. 游戏运行时处理碰撞和移动，产生新的 Companion 位置；
+5. Mod 读取执行前后的 Companion tile，写入 `action.result`；
+6. Mod 后续生成的 `snapshot` 反映新的 Companion 状态，CLI 读取结果或快照进行确认。
 
 `action.result` 是动作结果的即时观测，`snapshot` 是之后某个时刻的状态投影：前者用于判断这次请求发生了什么，后者用于获取 CLI 当前可见的游戏状态。`ping` 只验证 Mod 是否能够收发消息，不读取或改变实际游戏数据。
 
@@ -153,21 +155,23 @@ Demo 实现以下四个 CLI 命令：
 
 | 命令 | CLI 行为 | Mod 行为 |
 | --- | --- | --- |
-| `status` | 读取最新状态快照并打印 | 持续写入状态快照 |
+| `status` | 读取最新状态快照并打印 | 持续写入主农场主和 Companion 状态 |
 | `ping` | 写入请求并等待结果 | 读取请求并写回 `pong` |
-| `move` | 写入移动请求并等待结果 | 在游戏 tick 中对实际玩家施加一段受限移动输入，并写回前后位置 |
+| `move` | 写入 Companion 移动请求并等待结果 | 在游戏 tick 中控制 `companion-1` 在当前地图内移动，并写回前后位置 |
 | `watch` | 持续读取并打印状态变化 | 持续写入状态快照 |
 
 `status` 验证 Mod → CLI 的读取链路，`ping` 验证 CLI → Mod → CLI 的双向链路，`move` 验证一条有实际游戏副作用的写命令，`watch` 验证状态持续写出和外部读取。
 
+`move` 的协议固定使用 `actor_id=companion-1`。主农场主的状态只作为环境状态被读取，不是本 Demo 的动作目标。
+
 ### 非目标
 
-- 不实现 `move_to`、寻路、工具使用、菜单交互或其他复杂真实游戏动作；
+- 不实现跨地图自主旅行、工具使用、菜单交互或其他复杂真实游戏动作；
 - 不接入 LLM、MCP、RL 或自然语言解析；
 - 不实现全量游戏状态序列化；
 - 不支持多个 CLI 同时写入同一个 Bridge 目录；
 - 不把文件队列包装成网络服务；
-- 不处理多人游戏和跨机器通信；
+- 不处理原版多人 Farmhand、多人游戏和跨机器通信；
 - 不在 Demo 阶段引入全局守护进程或复杂文件监听库。
 
 ## 目录结构
@@ -184,19 +188,11 @@ stardew-agent/
 │   ├── Cargo.toml
 │   ├── src/
 │   │   ├── main.rs
-│   │   ├── cli.rs
-│   │   ├── protocol.rs
-│   │   └── bridge/
-│   │       ├── mod.rs
-│   │       ├── paths.rs
-│   │       ├── files.rs
-│   │       ├── requests.rs
-│   │       ├── results.rs
-│   │       └── snapshots.rs
+│   │   ├── fake.rs
+│   │   ├── bridge.rs
+│   │   └── protocol.rs
 │   └── tests/
-│       ├── protocol_tests.rs
-│       ├── file_bridge_tests.rs
-│       └── fake_mod_tests.rs
+│       └── bridge_tests.rs
 ├── smapi-mod/
 │   ├── StardewAgentMod.csproj
 │   ├── manifest.json
@@ -204,18 +200,13 @@ stardew-agent/
 ├── doc/
 │   └── demo/
 │       └── cli-file-bridge.md
-└── tests/
-    └── fixtures/
-        ├── snapshots/
-        ├── requests/
-        └── results/
 ```
 
-CLI 的 `protocol.rs` 和 C# Mod 中的 DTO 必须依据同一份协议字段维护。Demo 阶段不生成跨语言代码，先通过 JSON fixture 和协议测试保证字段一致。
+CLI 的 `protocol.rs` 和 C# Mod 中的 DTO 必须依据同一份协议字段维护。Demo 阶段不生成跨语言代码，先通过 Rust 集成测试和实际 JSON 文件读写保证字段一致。
 
 ## GitHub Actions 产物与配置
 
-GitHub Actions 负责生成可下载的 CLI 和 SMAPI Mod 产物，但不替代 Windows 真游戏验证。Mod 的 C# 程序集通常可以跨平台编译；CLI 则必须按运行平台分别生成，因为 macOS 二进制不能直接在 Windows 上运行。
+GitHub Actions 负责生成 Windows CLI 和 SMAPI Mod 产物，但不替代 Windows 真游戏验证。Mod 的 C# 程序集通常可以跨平台编译；CLI 运行在游戏所在的 Windows 环境，因此只发布 Windows 二进制。Mac 仍可从源码运行 Rust 测试和 Fake Mod，不作为发布产物。
 
 仓库根目录的 `Directory.Build.props` 只配置构建产物位置和 CI 行为：
 
@@ -230,11 +221,10 @@ GitHub Actions 负责生成可下载的 CLI 和 SMAPI Mod 产物，但不替代 
 
 `EnableModDeploy=false` 防止 CI 尝试把 Mod 复制到构建机的真实游戏目录；Mod zip 仍然会生成到 `_releases/`。本地有游戏环境时可以移除该配置，使用 SMAPI ModBuildConfig 的自动部署能力。
 
-`.github/workflows/build-demo.yml` 负责三类任务：
+`.github/workflows/build-demo.yml` 负责两类任务：
 
 1. 在 Ubuntu 构建 SMAPI Mod，并上传 `_releases/*.zip`；
-2. 在 macOS 构建 macOS CLI，供 Mac 本地测试使用；
-3. 在 Windows 构建 Windows CLI，供真实游戏验证使用。
+2. 在 Windows 构建 Windows CLI，供真实游戏验证使用。
 
 推荐的 Artifact 结构如下：
 
@@ -242,18 +232,13 @@ GitHub Actions 负责生成可下载的 CLI 和 SMAPI Mod 产物，但不替代 
 stardew-agent-mod-<run-number>/
 └── StardewAgentMod <version>.zip
 
-stardew-agent-cli-macos-<run-number>/
-└── release/
-    ├── stardew-cli
-    └── fake-mod
-
 stardew-agent-cli-windows-<run-number>/
 └── release/
     ├── stardew-cli.exe
     └── fake-mod.exe
 ```
 
-Windows 验证时下载 Mod zip 并解压到游戏的 `Mods/` 目录，再下载 Windows CLI Artifact。Mac Artifact 只用于本地 CLI/Fake Mod 测试，不能替代 Windows CLI，也不能替代真实游戏验证。
+Windows 验证时下载 Mod zip 并解压到游戏的 `Mods/` 目录，再下载 Windows CLI Artifact。Mac 本地使用源码构建的 CLI 或 Fake Mod 只用于协议和文件链路测试，不能替代真实游戏验证。
 
 ## 通信目录与文件语义
 
@@ -278,14 +263,17 @@ bridge/
 | `actions/processing/` | Mod | Mod | 已领取、正在处理的请求 |
 | `actions/archive/` | Mod | 调试工具 | 已处理请求的可选留档 |
 | `results/` | Mod | CLI | 请求的终态结果 |
-| `snapshots/` | Mod | CLI | 按序号生成的不可变状态快照 |
+| `snapshots/snapshot-latest.json` | Mod | CLI | Mod 最近一次写入的完整状态，反复替换 |
+| `snapshots/snapshot-{index}.json` | Mod | CLI/调试工具 | 固定槽位的历史快照，索引范围为 `0..SnapshotHistoryLimit-1` |
 | `errors/` | CLI 或 Mod | 调试工具 | 无法解析或无法归属的文件 |
 
 ### 文件命名
 
-请求文件名为 `{request_id}.json`，结果文件名与请求 ID 相同，状态快照文件名为 `snapshot-{sequence}.json`。请求 ID 使用 CLI 生成的 UUID 或带时间和序号的唯一字符串。
+请求文件名为 `{request_id}.json`，结果文件名与请求 ID 相同，历史状态快照文件名为 `snapshot-{index}.json`，最新状态固定为 `snapshot-latest.json`。请求 ID 使用 CLI 生成的 UUID 或带时间和序号的唯一字符串。
 
-状态快照采用追加文件而不是反复覆盖同一个 `bridge_data.json`。这样 CLI 可以只读取已经完整落盘的文件，也避免 Windows 上覆盖正在被读取的文件。后续如果确实需要固定文件名，再单独增加指针文件或原子替换实现。
+`snapshot-latest.json` 保存 Mod 最近一次写入的完整状态，不是历史文件指针。它按 `LatestWriteIntervalSeconds` 更新，并包含 `latest_write_sequence`、当前最新历史快照的 `snapshot_sequence` 和 `snapshot_index`。历史快照按 `SnapshotHistoryIntervalSeconds` 写入固定槽位；写入历史槽位后会立即用同一份最新状态重新发布 latest，以同步最新索引，因此两个间隔不一致时，latest 也可能由历史快照事件触发一次写入。写到 `SnapshotHistoryLimit - 1` 后从 `0` 重新覆盖。历史快照只会有配置数量的槽位，不通过“写新文件再删除旧文件”实现轮转。
+
+例如 `SnapshotHistoryLimit=3` 时，历史文件顺序为 `snapshot-0.json`、`snapshot-1.json`、`snapshot-2.json`、`snapshot-0.json`……。历史快照自身保存 `snapshot_sequence`，CLI 可以结合序号判断环回后的新旧关系。
 
 ### 文件写入规则
 
@@ -324,7 +312,8 @@ CLI 写入 `actions/pending/{request_id}.json`：
   "request_id": "req-000001",
   "created_at_ms": 1787449727000,
   "payload": {
-    "action": "ping"
+    "action": "ping",
+    "actor_id": "companion-1"
   }
 }
 ```
@@ -340,6 +329,7 @@ Mod 写入 `results/{request_id}.json`：
   "payload": {
     "status": "succeeded",
     "action": "ping",
+    "actor_id": "companion-1",
     "mod_tick": 123456,
     "world_ready": true
   }
@@ -348,7 +338,7 @@ Mod 写入 `results/{request_id}.json`：
 
 ### `move` 请求
 
-`move` 是 Demo 中唯一带有真实游戏副作用的命令。它不是寻路命令，而是在一个方向上按指定 tick 数对实际玩家施加受限移动输入。CLI 限制 `ticks` 的范围，例如 `1..=30`，避免一次请求长时间占用游戏输入。
+`move` 是 Demo 中唯一带有真实游戏副作用的命令。它控制 `actor_id=companion-1` 这个 AI Companion 在当前地图内进行受限移动。CLI 限制 `ticks` 的范围，例如 `1..=30`，避免一次请求长时间占用游戏动作执行器。
 
 CLI 写入请求：
 
@@ -360,13 +350,14 @@ CLI 写入请求：
   "created_at_ms": 1787449727100,
   "payload": {
     "action": "move_relative",
+    "actor_id": "companion-1",
     "direction": "right",
     "ticks": 15
   }
 }
 ```
 
-Mod 在 `UpdateTicked` 中执行这段短输入，并在结束后写回执行前后的玩家 tile：
+Mod 在 `UpdateTicked` 中驱动 Companion 的当前地图寻路，并在结束后写回执行前后的 Companion tile：
 
 ```json
 {
@@ -377,6 +368,7 @@ Mod 在 `UpdateTicked` 中执行这段短输入，并在结束后写回执行前
   "payload": {
     "status": "succeeded",
     "action": "move_relative",
+    "actor_id": "companion-1",
     "direction": "right",
     "ticks": 15,
     "before_tile": {"x": 64, "y": 15},
@@ -387,11 +379,11 @@ Mod 在 `UpdateTicked` 中执行这段短输入，并在结束后写回执行前
 }
 ```
 
-如果玩家不存在、世界尚未加载、方向或 tick 数非法，返回 `failed`；如果输入已执行但玩家被地图碰撞阻挡，结果返回 `blocked`，同时保留 `before_tile`、`after_tile` 和 `moved=false`。结果中的 tile 变化是本 Demo 验证“写入实际人物”的依据，不能只用“请求已收到”代替。
+如果 Companion 不存在、世界尚未加载、方向或 tick 数非法，返回 `failed`；如果路径不可达或被地图碰撞阻挡，结果返回 `blocked`，同时保留 `before_tile`、`after_tile` 和 `moved=false`。结果中的 tile 变化是本 Demo 验证“写入实际 Companion”的依据，不能只用“请求已收到”代替。
 
 ### 状态快照
 
-Mod 每隔固定游戏 tick 生成 `snapshots/snapshot-{sequence}.json`：
+Mod 按配置间隔生成固定槽位的 `snapshots/snapshot-{index}.json`，并按另一配置间隔更新完整的 `snapshots/snapshot-latest.json`：
 
 ```json
 {
@@ -400,7 +392,9 @@ Mod 每隔固定游戏 tick 生成 `snapshots/snapshot-{sequence}.json`：
   "request_id": null,
   "created_at_ms": 1787449727015,
   "payload": {
-    "sequence": 42,
+    "latest_write_sequence": 42,
+    "snapshot_sequence": 7,
+    "snapshot_index": 7,
     "mod_version": "0.1.0",
     "game_tick": 123456,
     "world_ready": true,
@@ -413,6 +407,15 @@ Mod 每隔固定游戏 tick 生成 `snapshots/snapshot-{sequence}.json`：
     "player": {
       "location": "Farm",
       "tile": {"x": 64, "y": 15}
+    },
+    "companion": {
+      "id": "companion-1",
+      "type": "ai_companion",
+      "display_name": "Companion",
+      "location": "Farm",
+      "tile": {"x": 66, "y": 15},
+      "world_ready": true,
+      "busy": false
     }
   }
 }
@@ -468,11 +471,11 @@ sequenceDiagram
     participant S as snapshots
     participant C as CLI
 
-    M->>M: 在游戏事件中读取最小状态
-    M->>S: 写入递增 sequence 的快照
-    C->>S: 列出 snapshot-*.json
-    C->>S: 读取 sequence 最大的完整文件
-    C-->>C: 校验 schema 和快照新鲜度
+    M->>M: 在游戏事件中读取主农场主和 Companion 状态
+    M->>S: 按配置写入 latest 完整状态和环形历史槽位
+    C->>S: 读取 snapshot-latest.json 完整状态
+    C->>S: latest 缺失时回退到 snapshot_sequence 最大的历史槽位
+    C-->>C: 校验 schema、latest_write_sequence 和快照新鲜度
     C-->>C: 打印状态
 ```
 
@@ -483,17 +486,17 @@ sequenceDiagram
     participant C as CLI
     participant P as actions/pending
     participant M as SMAPI Mod
-    participant G as 实际玩家
+    participant G as Companion
     participant R as results
 
     C->>C: 校验 direction 和 ticks
     C->>P: 原子写入 move_relative 请求
     M->>P: 在 UpdateTicked 中领取请求
-    M->>M: 记录 before_tile，创建短时移动任务
+    M->>M: 校验 actor_id，记录 Companion before_tile
     loop 每个游戏 tick
-        M->>G: 施加一个方向的移动输入
+        M->>G: 驱动 Companion 当前地图寻路
     end
-    M->>G: 读取 after_tile
+    M->>G: 读取 Companion after_tile
     M->>R: 原子写入 succeeded/blocked/failed
     C->>R: 轮询 request_id 对应结果
     R-->>C: 读取执行状态和前后位置
@@ -503,7 +506,7 @@ Mod 的移动执行器应把游戏对象访问限制在 SMAPI 允许的 GameLoop
 
 ### `watch` 读取流程
 
-`watch` 不读取游戏进程，只按固定间隔查询 `snapshots/`。当最新快照序号发生变化时，CLI 解析并打印差异。读取失败时保留上一次成功快照，同时打印错误，不把半截文件当作状态。
+`watch` 不读取游戏进程，只按固定间隔查询 `snapshot-latest.json`。当 `latest_write_sequence` 发生变化时，CLI 解析并打印主农场主和 Companion 的最新状态。读取失败时保留上一次成功快照，同时打印错误，不把半截文件当作状态。历史槽位只用于 latest 丢失时回退和调试。
 
 ## CLI 设计
 
@@ -522,14 +525,10 @@ stardew-cli --bridge-dir <PATH> watch [--interval-ms <MILLISECONDS>]
 
 | 模块 | 职责 |
 | --- | --- |
-| `cli.rs` | 解析子命令、参数和退出码 |
+| `main.rs` | 解析子命令、参数和退出码 |
 | `protocol.rs` | 定义 Rust 结构体、序列化和反序列化 |
-| `paths.rs` | 根据 Bridge 根目录计算各子目录 |
-| `files.rs` | 原子写入、JSON 读取、文件移动和目录创建 |
-| `requests.rs` | 生成请求 ID、提交请求和等待结果 |
-| `results.rs` | 读取、校验和格式化结果 |
-| `snapshots.rs` | 查找最新快照、检查序号和新鲜度 |
-| `main.rs` | 组装配置、调用命令并返回进程退出码 |
+| `bridge.rs` | 创建目录、提交请求、等待结果、读取最新状态和维护历史槽位 |
+| `fake.rs` | 在没有游戏的环境中模拟 Mod 的请求处理和状态写出 |
 
 ### 数据类型
 
@@ -590,27 +589,26 @@ Demo 的文件轮询使用标准库文件 API 和定时等待，不引入文件�
 
 | 组件 | 职责 |
 | --- | --- |
-| `ModEntry` | 注册 `GameLoop` 事件，创建 Bridge 服务 |
+| `ModEntry` | 注册事件、扫描并领取请求、驱动动作和写入结果 |
 | `BridgePaths` | 解析 Bridge 根目录和子目录 |
-| `ActionReader` | 在 `UpdateTicked` 中扫描并领取请求 |
-| `ActionHandler` | 解析 `ping` 和 `move_relative`，生成结果 |
-| `SnapshotWriter` | 读取最小游戏状态并写快照 |
-| `MoveExecutor` | 在游戏 tick 中执行受限移动输入，记录前后玩家 tile |
-| `BridgeFileWriter` | 原子写入结果、快照和错误文件 |
-| `BridgeLifecycle` | 处理启动、读档、返回标题和关闭 |
+| `Protocol DTO` | 解析 `ping`、`move_relative` 以及 snapshot 的 JSON 结构 |
+| `CompanionController` | 创建单个 Companion，维护可见 NPC 与 shadow farmer，并限制其与主农场主同地图 |
+| `MoveExecutor` | 在游戏 tick 中驱动 Companion 当前地图寻路，记录前后 Companion tile |
+| `BridgeFileStore` | 原子写入结果、快照和错误文件，并维护快照槽位 |
+| `CompanionNpc` / `BotFarmer` | 分别提供可见 NPC 和不加入原版多人集合的 shadow farmer |
 
 ### GameLoop 时机
 
 | 事件 | Demo 行为 |
 | --- | --- |
 | `Entry` | 读取配置、创建目录、初始化日志 |
-| `GameLaunched` | 标记 Mod 进程已启动 |
-| `UpdateTicked` | 扫描并处理最多限定数量的请求 |
-| `OneSecondUpdateTicked` | 写入状态快照 |
-| `SaveLoaded` | 更新 `world_ready` 和游戏状态 |
-| `ReturnedToTitle` | 写入 `world_ready=false` 的状态并清空处理中请求 |
+| `UpdateTicked` | 确保 Companion 存在、驱动移动、扫描并处理请求 |
+| `OneSecondUpdateTicked` | 按 `LatestWriteIntervalSeconds` 更新 latest，按 `SnapshotHistoryIntervalSeconds` 覆盖历史槽位 |
+| `DayStarted` | 恢复 Companion shadow farmer 的日间状态 |
+| `DayEnding` | 让 Companion shadow farmer 进入可结束当天的状态 |
+| `ReturnedToTitle` | 取消进行中的移动并清理 Companion |
 
-文件读取和 JSON 解析可以在游戏线程之外准备，但访问 `Game1`、玩家、地点和菜单等游戏对象必须放在 SMAPI 允许的游戏事件上下文中。Demo 的 `ping` 不访问游戏对象，只返回 Mod tick；`move` 在 `UpdateTicked` 中访问实际玩家并施加短时输入；状态快照在游戏事件中读取最小字段。
+文件读取和 JSON 解析可以在游戏线程之外准备，但访问 `Game1`、玩家、地点和菜单等游戏对象必须放在 SMAPI 允许的游戏事件上下文中。Demo 的 `ping` 不改变游戏对象，只返回 Mod tick；`move` 在 `UpdateTicked` 中访问 Companion 并驱动当前地图寻路；状态快照在游戏事件中读取主农场主和 Companion 的最小字段。
 
 ### 请求领取
 
@@ -624,11 +622,11 @@ Mod 每次 `UpdateTicked` 扫描 `actions/pending/`：
 
 领取失败表示请求已经被其他消费者领取，Mod 不读取该文件。Demo 不支持多 Mod 消费同一个 Bridge 目录。
 
-### 实际人物动作执行
+### Companion 动作执行
 
-`move_relative` 领取后不直接把“已领取”当成成功。`MoveExecutor` 保存 `request_id`、方向、剩余 tick 数和 `before_tile`，在后续 `UpdateTicked` 中每 tick 施加一次输入；剩余 tick 数归零后读取玩家当前位置并生成终态结果。执行期间不领取第二个 `move_relative`，避免两个请求同时控制玩家。若 Demo 只允许单个动作占用执行器，新的移动请求返回 `failed`，并设置 `error.code=busy`；CLI 在收到结果后再发送下一条请求。
+`move_relative` 领取后不直接把“已领取”当成成功。`MoveExecutor` 保存 `request_id`、方向、目标 tile 和 `before_tile`，在后续 `UpdateTicked` 中驱动 Companion 当前地图寻路；到达目标或判定不可达后读取 Companion 当前位置并生成终态结果。执行期间不领取第二个 `move_relative`，避免两个请求同时控制 Companion。若 Demo 只允许单个动作占用执行器，新的移动请求返回 `failed`，并设置 `error.code=busy`；CLI 在收到结果后再发送下一条请求。
 
-方向输入应通过 SMAPI 提供的输入接口或目标版本对应的游戏 API 完成，不能直接修改玩家坐标来伪造移动。公开的 [StardewMCP CommandExecutor](https://github.com/Hunter-Thompson/stardew-mcp/blob/3ca54bbfc1d446eeb06d822a74c92cd14df82b93/mod/StardewMCP/CommandExecutor.cs) 可作为“在 tick 中施加方向输入”的实现参考；它不是本 Demo 的依赖，也不定义本 Demo 的协议。
+Companion 移动使用当前地图的寻路控制器，不能直接修改主农场主坐标来伪造移动。Companion 的可见 NPC 和 shadow farmer 只用于本地 Mod 内部，不加入原版多人 Farmhand 集合；本 Demo 不承诺跨地图后台自主运行。
 
 ## 错误、超时与崩溃恢复
 
@@ -644,7 +642,7 @@ Mod 重启后重新创建目录但不自动重放 `processing/` 中的请求。�
 
 ### 过期文件
 
-CLI 和 Mod 都检查 `created_at_ms`。超过配置保留时间的 pending、processing、results 和 snapshots 文件由显式的 `cleanup` 命令或后续维护任务处理；Demo 不在游戏 tick 中做大规模清理。
+CLI 和 Mod 都检查 `created_at_ms`。状态快照的历史文件使用固定槽位轮转，数量由 `SnapshotHistoryLimit` 配置；pending、processing、results、archive 和 errors 的长期清理仍由显式的 `cleanup` 命令或后续维护任务处理。
 
 ### JSON 损坏
 
@@ -664,7 +662,7 @@ CLI 不依赖游戏安装，可以在 Mac 上完成：
 - Fake Mod 对 `ping` 的读写闭环；
 - 多个请求文件的排序、重复和损坏处理。
 
-GitHub Actions 还会在 macOS runner 上生成 CLI Artifact，在 Ubuntu runner 上生成 Mod zip；这两类构建产物都不需要启动游戏。
+GitHub Actions 还会在 Windows runner 上生成 CLI Artifact，在 Ubuntu runner 上生成 Mod zip；这两类构建产物都不需要启动游戏。
 
 Fake Mod 是一个测试进程，不访问 Stardew Valley，只读取 `actions/pending/` 并写入 `results/`，同时按固定间隔生成测试快照。
 
@@ -677,7 +675,7 @@ Windows 上只验证依赖真实游戏的部分：
 - `UpdateTicked` 能读取 pending 请求；
 - `OneSecondUpdateTicked` 能写出状态快照；
 - `ping` 能返回真实游戏 tick 和 `world_ready`；
-- `move --direction right --ticks 15` 能让实际玩家产生可观察的 tile 变化，或在碰撞阻挡时返回 `blocked`；
+- `move --direction right --ticks 15` 能让 Companion 产生可观察的 tile 变化，或在碰撞阻挡时返回 `blocked`；
 - 读档和返回标题时状态字段变化符合预期。
 
 每次 Windows 验证保存以下 artifact：SMAPI 日志、CLI 输出、一个请求文件、一个结果文件、一个状态快照和版本信息。之后只改 CLI 或协议测试时，可以复用这些 artifact 做回放。
@@ -691,11 +689,11 @@ Windows 上只验证依赖真实游戏的部分：
 5. 编写 Fake Mod，完成 Mac 上的 CLI 双向文件测试。
 6. 创建最小 SMAPI Mod，注册生命周期事件和 Bridge 目录配置。
 7. 在 Mod 中实现 `ping` 的请求领取和结果写入。
-8. 在 Mod 中实现 `move_relative`：输入校验、短时移动、前后 tile 读取和阻挡结果。
+8. 在 Mod 中实现 `move_relative`：Companion 目标校验、当前地图寻路、前后 tile 读取和阻挡结果。
 9. 在 Mod 中实现最小状态快照写入。
-10. 在 Windows 游戏环境中执行一次真实连通性和实际人物移动验证。
+10. 在 Windows 游戏环境中执行一次真实连通性和 Companion 移动验证。
 11. 根据真实运行结果修正路径、权限、生命周期、输入 API 和状态字段问题。
-12. 在 GitHub Actions 中固定 CLI 的 macOS/Windows 产物和 SMAPI Mod zip 的上传流程。
+12. 在 GitHub Actions 中固定 Windows CLI 产物和 SMAPI Mod zip 的上传流程。
 
 ## 验收标准
 
@@ -706,6 +704,8 @@ Windows 上只验证依赖真实游戏的部分：
 - CLI 能识别成功结果、失败结果、超时和损坏 JSON；
 - `stardew-cli status` 能读取最新快照；
 - `stardew-cli watch` 能观察快照序号变化；
+- `snapshot-latest.json` 始终反映最近一次完整状态写出，并维护当前历史槽位索引；
+- 历史快照按固定槽位轮转，槽位数量由 `SnapshotHistoryLimit` 控制；
 - Fake Mod 能模拟 `move_relative` 的结果，验证移动请求字段、结果字段和阻挡状态；
 - 重复请求不会覆盖其他请求或结果；
 - 测试结束后能清理临时 Bridge 目录。
@@ -715,7 +715,7 @@ Windows 上只验证依赖真实游戏的部分：
 - Mod 能正常加载且不影响游戏启动；
 - CLI 与 Mod 使用同一个 Bridge 目录；
 - `ping` 能完成 CLI 写、Mod 读、Mod 写、CLI 读的闭环；
-- 状态快照至少包含 Mod 版本、游戏 tick、`world_ready`、地点和玩家 tile；
+- 状态快照至少包含 Mod 版本、游戏 tick、`world_ready`、主农场主地点和 tile，以及 Companion 的 ID、地点和 tile；
 - 返回标题后不会继续报告旧的 `world_ready=true`；
 - 一次完整验证产生可供 Mac 回放的请求、结果、快照和日志文件。
 

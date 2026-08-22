@@ -2,6 +2,7 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 pub const SCHEMA_VERSION: &str = "0.1";
+pub const COMPANION_ID: &str = "companion-1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope<T> {
@@ -15,8 +16,12 @@ pub struct Envelope<T> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ActionRequestPayload {
-    Ping,
-    MoveRelative { direction: Direction, ticks: u32 },
+    Ping { actor_id: String },
+    MoveRelative {
+        actor_id: String,
+        direction: Direction,
+        ticks: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ValueEnum)]

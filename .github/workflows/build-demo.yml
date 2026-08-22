@@ -16,9 +16,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: macos
-            os: macos-latest
-            binary_suffix: ""
           - name: windows
             os: windows-latest
             binary_suffix: ".exe"

@@ -20,8 +20,21 @@ pub fn run(bridge_dir: PathBuf, interval_ms: u64, once: bool) -> Result<()> {
     let processing = bridge.root.join("actions/processing");
     let archive = bridge.root.join("actions/archive");
     let results = bridge.root.join("results");
-    let mut tile = (64_i32, 15_i32);
-    let mut sequence = 0_u64;
+    let player_tile = (64_i32, 15_i32);
+    let mut companion_tile = (65_i32, 15_i32);
+    let mut latest_write_sequence = bridge
+        .latest_snapshot()?
+        .and_then(|snapshot| {
+            snapshot
+                .payload
+                .get("latest_write_sequence")
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(0);
+    let mut snapshot_sequence = bridge
+        .latest_snapshot()?
+        .and_then(|snapshot| snapshot.payload.get("snapshot_sequence").and_then(Value::as_u64))
+        .unwrap_or(0);
     let mut last_snapshot = Instant::now() - Duration::from_millis(interval_ms);
 
     loop {
@@ -30,13 +43,20 @@ pub fn run(bridge_dir: PathBuf, interval_ms: u64, once: bool) -> Result<()> {
             &processing,
             &archive,
             &results,
-            &mut tile,
-            sequence,
+            &mut companion_tile,
+            latest_write_sequence,
         )?;
 
         if last_snapshot.elapsed() >= Duration::from_millis(interval_ms.max(50)) {
-            sequence += 1;
-            write_snapshot(&bridge, sequence, tile)?;
+            latest_write_sequence += 1;
+            snapshot_sequence += 1;
+            write_snapshot(
+                &bridge,
+                snapshot_sequence,
+                latest_write_sequence,
+                player_tile,
+                companion_tile,
+            )?;
             last_snapshot = Instant::now();
         }
 
@@ -52,7 +72,7 @@ fn process_pending(
     processing: &Path,
     archive: &Path,
     results: &Path,
-    tile: &mut (i32, i32),
+    companion_tile: &mut (i32, i32),
     mod_tick: u64,
 ) -> Result<bool> {
     let Some(path) = fs::read_dir(pending)?
@@ -72,7 +92,7 @@ fn process_pending(
     let request_id = file_name.to_string_lossy().trim_end_matches(".json").to_owned();
     let result = match fs::read_to_string(&processing_path) {
         Ok(content) => match serde_json::from_str::<ActionRequest>(&content) {
-            Ok(request) => execute_request(request, tile, mod_tick),
+            Ok(request) => execute_request(request, companion_tile, mod_tick),
             Err(error) => failure(&request_id, "invalid_request", error.to_string()),
         },
         Err(error) => failure(&request_id, "read_error", error.to_string()),
@@ -85,33 +105,39 @@ fn process_pending(
 
 fn execute_request(
     request: ActionRequest,
-    tile: &mut (i32, i32),
+    companion_tile: &mut (i32, i32),
     mod_tick: u64,
 ) -> Envelope<Value> {
     let request_id = request.request_id.unwrap_or_else(|| "unknown".to_owned());
     let payload = match request.payload {
-        ActionRequestPayload::Ping => json!({
+        ActionRequestPayload::Ping { actor_id } => json!({
             "status": "succeeded",
             "action": "ping",
+            "actor_id": actor_id,
             "mod_tick": mod_tick,
             "world_ready": true,
         }),
-        ActionRequestPayload::MoveRelative { direction, ticks } => {
-            let before = json!({"x": tile.0, "y": tile.1});
+        ActionRequestPayload::MoveRelative {
+            actor_id,
+            direction,
+            ticks,
+        } => {
+            let before = json!({"x": companion_tile.0, "y": companion_tile.1});
             let distance = (ticks / 5).max(1) as i32;
             match direction {
-                Direction::Up => tile.1 -= distance,
-                Direction::Down => tile.1 += distance,
-                Direction::Left => tile.0 -= distance,
-                Direction::Right => tile.0 += distance,
+                Direction::Up => companion_tile.1 -= distance,
+                Direction::Down => companion_tile.1 += distance,
+                Direction::Left => companion_tile.0 -= distance,
+                Direction::Right => companion_tile.0 += distance,
             }
             json!({
                 "status": "succeeded",
                 "action": "move_relative",
+                "actor_id": actor_id,
                 "direction": direction.as_str(),
                 "ticks": ticks,
                 "before_tile": before,
-                "after_tile": {"x": tile.0, "y": tile.1},
+                "after_tile": {"x": companion_tile.0, "y": companion_tile.1},
                 "moved": true,
                 "world_ready": true,
             })
@@ -139,23 +165,37 @@ fn failure(request_id: &str, code: &str, message: String) -> Envelope<Value> {
     }
 }
 
-fn write_snapshot(bridge: &Bridge, sequence: u64, tile: (i32, i32)) -> Result<()> {
+fn write_snapshot(
+    bridge: &Bridge,
+    snapshot_sequence: u64,
+    latest_write_sequence: u64,
+    player_tile: (i32, i32),
+    companion_tile: (i32, i32),
+) -> Result<()> {
     let snapshot = Envelope {
         schema_version: SCHEMA_VERSION.to_owned(),
         message_type: "snapshot".to_owned(),
         request_id: None::<String>,
         created_at_ms: now_ms(),
         payload: json!({
-            "sequence": sequence,
+            "latest_write_sequence": latest_write_sequence,
+            "snapshot_sequence": snapshot_sequence,
+            "snapshot_index": -1,
             "mod_version": "0.1.0-fake",
-            "game_tick": sequence * 60,
+            "game_tick": latest_write_sequence * 60,
             "world_ready": true,
             "game": {"year": 1, "season": "spring", "day": 1, "time": 900},
-            "player": {"location": "Farm", "tile": {"x": tile.0, "y": tile.1}},
+            "player": {"location": "Farm", "tile": {"x": player_tile.0, "y": player_tile.1}},
+            "companion": {
+                "id": "companion-1",
+                "type": "ai_companion",
+                "display_name": "Companion",
+                "location": "Farm",
+                "tile": {"x": companion_tile.0, "y": companion_tile.1},
+                "world_ready": true,
+                "busy": false
+            }
         }),
     };
-    atomic_write_json(
-        &bridge.root.join("snapshots").join(format!("snapshot-{sequence}.json")),
-        &snapshot,
-    )
+    bridge.write_snapshot(snapshot_sequence, latest_write_sequence, &snapshot, 10)
 }

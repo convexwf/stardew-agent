@@ -46,6 +46,9 @@ internal sealed class Envelope<T>
 
 internal sealed class MovePayload
 {
+    [JsonPropertyName("actor_id")]
+    public string ActorId { get; set; } = "companion-1";
+
     [JsonPropertyName("direction")]
     public string Direction { get; set; } = "";
 
@@ -73,6 +76,9 @@ internal sealed class ErrorDetail
 
 internal sealed class PingResultPayload
 {
+    [JsonPropertyName("actor_id")]
+    public string ActorId { get; set; } = "companion-1";
+
     [JsonPropertyName("status")]
     public string Status { get; set; } = "succeeded";
 
@@ -88,6 +94,9 @@ internal sealed class PingResultPayload
 
 internal sealed class MoveResultPayload
 {
+    [JsonPropertyName("actor_id")]
+    public string ActorId { get; set; } = "companion-1";
+
     [JsonPropertyName("status")]
     public string Status { get; set; } = "failed";
 
@@ -128,8 +137,14 @@ internal sealed class TileDto
 
 internal sealed class SnapshotPayload
 {
-    [JsonPropertyName("sequence")]
-    public long Sequence { get; set; }
+    [JsonPropertyName("latest_write_sequence")]
+    public long LatestWriteSequence { get; set; }
+
+    [JsonPropertyName("snapshot_sequence")]
+    public long SnapshotSequence { get; set; }
+
+    [JsonPropertyName("snapshot_index")]
+    public int SnapshotIndex { get; set; } = -1;
 
     [JsonPropertyName("mod_version")]
     public string ModVersion { get; set; } = "0.1.0";
@@ -147,6 +162,34 @@ internal sealed class SnapshotPayload
     [JsonPropertyName("player")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public PlayerInfo? Player { get; set; }
+
+    [JsonPropertyName("companion")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public CompanionInfo? Companion { get; set; }
+}
+
+internal sealed class CompanionInfo
+{
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = "companion-1";
+
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = "ai_companion";
+
+    [JsonPropertyName("display_name")]
+    public string DisplayName { get; set; } = "Companion";
+
+    [JsonPropertyName("location")]
+    public string Location { get; set; } = "";
+
+    [JsonPropertyName("tile")]
+    public TileDto Tile { get; set; } = new();
+
+    [JsonPropertyName("world_ready")]
+    public bool WorldReady { get; set; }
+
+    [JsonPropertyName("busy")]
+    public bool Busy { get; set; }
 }
 
 internal sealed class GameInfo
