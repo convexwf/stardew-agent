@@ -1,7 +1,7 @@
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: &str = "0.1";
+pub const SCHEMA_VERSION: &str = "0.2";
 pub const COMPANION_ID: &str = "companion-1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,11 +16,64 @@ pub struct Envelope<T> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ActionRequestPayload {
-    Ping { actor_id: String },
+    Ping {
+        actor_id: String,
+    },
     MoveRelative {
         actor_id: String,
         direction: Direction,
         ticks: u32,
+    },
+    MoveTo {
+        actor_id: String,
+        x: i32,
+        y: i32,
+    },
+    FaceDirection {
+        actor_id: String,
+        direction: Direction,
+    },
+    UseTool {
+        actor_id: String,
+        tool: ToolKind,
+        x: i32,
+        y: i32,
+    },
+    Interact {
+        actor_id: String,
+        x: i32,
+        y: i32,
+    },
+    WarpTo {
+        actor_id: String,
+        location: String,
+        x: i32,
+        y: i32,
+    },
+    Observe {
+        actor_id: String,
+        radius: u32,
+    },
+    GetInventory {
+        actor_id: String,
+    },
+    Attack {
+        actor_id: String,
+    },
+    CastFishingRod {
+        actor_id: String,
+    },
+    SetAutoCombat {
+        actor_id: String,
+        enabled: bool,
+    },
+    EatItem {
+        actor_id: String,
+        slot: Option<usize>,
+    },
+    Cancel {
+        actor_id: String,
+        target_request_id: String,
     },
 }
 
@@ -40,6 +93,28 @@ impl Direction {
             Self::Down => "down",
             Self::Left => "left",
             Self::Right => "right",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolKind {
+    Pickaxe,
+    Axe,
+    Hoe,
+    WateringCan,
+    Sword,
+}
+
+impl ToolKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pickaxe => "pickaxe",
+            Self::Axe => "axe",
+            Self::Hoe => "hoe",
+            Self::WateringCan => "watering_can",
+            Self::Sword => "sword",
         }
     }
 }

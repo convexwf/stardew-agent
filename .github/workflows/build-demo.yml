@@ -2,6 +2,8 @@ name: Build Stardew Agent demo
 
 on:
   push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
 
@@ -64,3 +66,61 @@ jobs:
           name: stardew-agent-mod-${{ github.run_number }}
           path: _releases/*.zip
           if-no-files-found: error
+
+  release-latest:
+    name: Update latest GitHub Release
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
+    needs:
+      - build-cli
+      - build-smapi-mod
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    concurrency:
+      group: stardew-agent-latest-release
+      cancel-in-progress: false
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p release-assets cli-assets
+
+          mod_zip="$(find artifacts -type f -name '*.zip' -print -quit)"
+          test -n "$mod_zip"
+          cp "$mod_zip" release-assets/stardew-agent-mod.zip
+
+          cli="$(find artifacts -type f -name 'stardew-cli.exe' -print -quit)"
+          fake_mod="$(find artifacts -type f -name 'fake-mod.exe' -print -quit)"
+          test -n "$cli"
+          test -n "$fake_mod"
+          cp "$cli" cli-assets/stardew-cli.exe
+          cp "$fake_mod" cli-assets/fake-mod.exe
+          (cd cli-assets && zip -q ../release-assets/stardew-agent-cli-windows.zip stardew-cli.exe fake-mod.exe)
+
+          ls -la release-assets
+
+      - name: Create or update latest GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Demo
+          body: |
+            自动构建的 Stardew Agent Demo 产物。
+
+            构建提交：${{ github.sha }}
+            构建时间：${{ github.event.head_commit.timestamp || github.run_started_at }}
+          prerelease: true
+          overwrite_files: true
+          files: |
+            release-assets/stardew-agent-cli-windows.zip
+            release-assets/stardew-agent-mod.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

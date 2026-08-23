@@ -20,6 +20,7 @@ internal sealed class ModEntry : Mod
     private int _snapshotHistoryIntervalSeconds;
     private int _snapshotHistoryLimit;
     private long _modTick;
+    private bool _initialSnapshotWritten;
 
     public override void Entry(IModHelper helper)
     {
@@ -64,7 +65,11 @@ internal sealed class ModEntry : Mod
         if (Context.IsWorldReady)
         {
             _companion?.EnsureSpawned();
-            _companion?.EnsureSameLocationAsPlayer();
+            if (!_initialSnapshotWritten && _companion?.IsSpawned == true)
+            {
+                WriteLatestSnapshot(advanceSequence: true);
+                _initialSnapshotWritten = true;
+            }
         }
 
         FinishMoveIfReady(_moveExecutor?.Tick());
@@ -78,13 +83,11 @@ internal sealed class ModEntry : Mod
 
         _latestWriteSeconds++;
         _snapshotSeconds++;
-
         if (_latestWriteSeconds >= _latestWriteIntervalSeconds)
         {
             _latestWriteSeconds = 0;
             WriteLatestSnapshot(advanceSequence: true);
         }
-
         if (_snapshotSeconds >= _snapshotHistoryIntervalSeconds)
         {
             _snapshotSeconds = 0;
@@ -130,10 +133,8 @@ internal sealed class ModEntry : Mod
         foreach (var pendingPath in pendingFiles)
         {
             var processingPath = _store.TryClaim(pendingPath);
-            if (processingPath is null)
-                continue;
-
-            ProcessClaimedRequest(processingPath);
+            if (processingPath is not null)
+                ProcessClaimedRequest(processingPath);
         }
     }
 
@@ -148,25 +149,62 @@ internal sealed class ModEntry : Mod
             var json = File.ReadAllText(processingPath);
             var request = JsonSerializer.Deserialize<Envelope<JsonElement>>(json, Protocol.JsonOptions)
                 ?? throw new JsonException("request is empty");
-
+            if (request.SchemaVersion != Protocol.SchemaVersion)
+            {
+                WriteFailure(request.RequestId ?? fallbackRequestId, "unsupported_schema", $"unsupported schema version: {request.SchemaVersion}", null, null);
+                MoveToErrors(processingPath);
+                return;
+            }
             if (request.MessageType != "action.request" || string.IsNullOrWhiteSpace(request.RequestId))
                 throw new JsonException("request envelope is invalid");
 
-            var action = request.Payload.TryGetProperty("action", out var actionElement)
-                ? actionElement.GetString()
-                : null;
-
+            var action = ReadString(request.Payload, "action");
             switch (action)
             {
                 case "ping":
-                    WritePingResult(request.RequestId);
-                    Archive(processingPath);
+                    ExecutePing(request, processingPath);
                     break;
                 case "move_relative":
-                    StartMove(request, processingPath);
+                    StartMoveRelative(request, processingPath);
+                    break;
+                case "move_to":
+                    StartMoveTo(request, processingPath);
+                    break;
+                case "face_direction":
+                    ExecuteFaceDirection(request, processingPath);
+                    break;
+                case "use_tool":
+                    ExecuteUseTool(request, processingPath);
+                    break;
+                case "interact":
+                    ExecuteInteract(request, processingPath);
+                    break;
+                case "warp_to":
+                    ExecuteWarp(request, processingPath);
+                    break;
+                case "observe":
+                    ExecuteObserve(request, processingPath);
+                    break;
+                case "get_inventory":
+                    ExecuteInventory(request, processingPath);
+                    break;
+                case "attack":
+                    ExecuteAttack(request, processingPath);
+                    break;
+                case "cast_fishing_rod":
+                    ExecuteCastFishingRod(request, processingPath);
+                    break;
+                case "set_auto_combat":
+                    ExecuteSetAutoCombat(request, processingPath);
+                    break;
+                case "eat_item":
+                    ExecuteEatItem(request, processingPath);
+                    break;
+                case "cancel":
+                    ExecuteCancel(request, processingPath);
                     break;
                 default:
-                    WriteFailure(request.RequestId, "unsupported_action", $"unsupported action: {action ?? "<missing>"}");
+                    WriteFailure(request.RequestId!, "unsupported_action", $"unsupported action: {action ?? "<missing>"}", action, ReadActorId(request.Payload));
                     Archive(processingPath);
                     break;
             }
@@ -174,33 +212,74 @@ internal sealed class ModEntry : Mod
         catch (Exception error)
         {
             Monitor.Log($"Invalid request {fallbackRequestId}: {error.Message}", LogLevel.Warn);
-            WriteFailure(fallbackRequestId, "invalid_request", error.Message);
+            WriteFailure(fallbackRequestId, "invalid_request", error.Message, null, null);
             MoveToErrors(processingPath);
         }
     }
 
-    private void StartMove(Envelope<JsonElement> request, string processingPath)
+    private void ExecutePing(Envelope<JsonElement> request, string processingPath)
     {
-        if (_moveExecutor is null || request.RequestId is null)
-            return;
-
-        var payload = JsonSerializer.Deserialize<MovePayload>(request.Payload.GetRawText(), Protocol.JsonOptions)
-            ?? throw new JsonException("move payload is empty");
-        if (!string.Equals(payload.ActorId, CompanionController.Id, StringComparison.OrdinalIgnoreCase))
+        if (!TryValidateActor(request, "ping", out var actorId))
         {
-            WriteFailure(request.RequestId, "unsupported_actor", $"only {CompanionController.Id} is available in this demo");
             Archive(processingPath);
             return;
         }
+        WriteResult(request.RequestId!, new PingResultPayload
+        {
+            ActorId = actorId,
+            ModTick = _modTick,
+            WorldReady = Context.IsWorldReady
+        });
+        Archive(processingPath);
+    }
 
-        var started = _moveExecutor.TryStart(request.RequestId, payload.Direction, payload.Ticks, out var immediateFailure);
+    private void StartMoveRelative(Envelope<JsonElement> request, string processingPath)
+    {
+        if (!TryValidateActor(request, "move_relative", out _))
+        {
+            Archive(processingPath);
+            return;
+        }
+        var payload = JsonSerializer.Deserialize<MovePayload>(request.Payload.GetRawText(), Protocol.JsonOptions)
+            ?? throw new JsonException("move_relative payload is empty");
+        if (_moveExecutor is null)
+        {
+            WriteFailure(request.RequestId!, "executor_unavailable", "the movement executor is unavailable", "move_relative", ReadActorId(request.Payload));
+            Archive(processingPath);
+            return;
+        }
+        var started = _moveExecutor.TryStartRelative(request.RequestId!, payload.Direction, payload.Ticks, out var failure);
         if (!started)
         {
-            WriteMoveResult(immediateFailure!);
+            WriteMoveResult(failure!);
             Archive(processingPath);
             return;
         }
+        _activeProcessingPath = processingPath;
+    }
 
+    private void StartMoveTo(Envelope<JsonElement> request, string processingPath)
+    {
+        if (!TryValidateActor(request, "move_to", out _))
+        {
+            Archive(processingPath);
+            return;
+        }
+        var payload = JsonSerializer.Deserialize<MoveToPayload>(request.Payload.GetRawText(), Protocol.JsonOptions)
+            ?? throw new JsonException("move_to payload is empty");
+        if (_moveExecutor is null)
+        {
+            WriteFailure(request.RequestId!, "executor_unavailable", "the movement executor is unavailable", "move_to", ReadActorId(request.Payload));
+            Archive(processingPath);
+            return;
+        }
+        var started = _moveExecutor.TryStartTo(request.RequestId!, payload.X, payload.Y, out var failure);
+        if (!started)
+        {
+            WriteMoveResult(failure!);
+            Archive(processingPath);
+            return;
+        }
         _activeProcessingPath = processingPath;
     }
 
@@ -208,44 +287,249 @@ internal sealed class ModEntry : Mod
     {
         if (completion is null || _store is null || _activeProcessingPath is null)
             return;
-
         WriteMoveResult(completion);
         Archive(_activeProcessingPath);
         _activeProcessingPath = null;
     }
 
-    private void WritePingResult(string requestId)
+    private void ExecuteFaceDirection(Envelope<JsonElement> request, string processingPath)
     {
-        var payload = new PingResultPayload
+        var payload = Deserialize<FaceDirectionPayload>(request);
+        if (!TryValidateActor(request, "face_direction", out var actorId))
         {
-            ActorId = CompanionController.Id,
-            ModTick = _modTick,
-            WorldReady = Context.IsWorldReady
-        };
-        WriteResult(requestId, payload);
+            Archive(processingPath);
+            return;
+        }
+        ErrorDetail? error = null;
+        var success = _companion is not null && _companion.TryFaceDirection(payload.Direction, out error);
+        WriteActionResult(request.RequestId!, "face_direction", actorId, success, new { direction = payload.Direction }, error);
+        Archive(processingPath);
+    }
+
+    private void ExecuteUseTool(Envelope<JsonElement> request, string processingPath)
+    {
+        var payload = Deserialize<UseToolPayload>(request);
+        if (!TryValidateActor(request, "use_tool", out var actorId))
+        {
+            Archive(processingPath);
+            return;
+        }
+        object? data = null;
+        ErrorDetail? error = null;
+        var success = _companion is not null && _companion.TryUseTool(payload.Tool, payload.X, payload.Y, out data, out error);
+        WriteActionResult(request.RequestId!, "use_tool", actorId, success, data, error);
+        Archive(processingPath);
+    }
+
+    private void ExecuteInteract(Envelope<JsonElement> request, string processingPath)
+    {
+        var payload = Deserialize<InteractPayload>(request);
+        if (!TryValidateActor(request, "interact", out var actorId))
+        {
+            Archive(processingPath);
+            return;
+        }
+        object? data = null;
+        ErrorDetail? error = null;
+        var success = _companion is not null && _companion.TryInteract(payload.X, payload.Y, out data, out error);
+        WriteActionResult(request.RequestId!, "interact", actorId, success, data, error);
+        Archive(processingPath);
+    }
+
+    private void ExecuteWarp(Envelope<JsonElement> request, string processingPath)
+    {
+        var payload = Deserialize<WarpPayload>(request);
+        if (!TryValidateActor(request, "warp_to", out var actorId))
+        {
+            Archive(processingPath);
+            return;
+        }
+        object? data = null;
+        ErrorDetail? error = null;
+        var success = _companion is not null && _companion.TryWarp(payload.Location, payload.X, payload.Y, out data, out error);
+        WriteActionResult(request.RequestId!, "warp_to", actorId, success, data, error);
+        Archive(processingPath);
+    }
+
+    private void ExecuteObserve(Envelope<JsonElement> request, string processingPath)
+    {
+        var payload = Deserialize<ObservePayload>(request);
+        if (!TryValidateActor(request, "observe", out var actorId))
+        {
+            Archive(processingPath);
+            return;
+        }
+        if (payload.Radius is < 1 or > 16)
+        {
+            WriteActionResult(request.RequestId!, "observe", actorId, false, null, new ErrorDetail { Code = "invalid_radius", Message = "radius must be between 1 and 16" });
+            Archive(processingPath);
+            return;
+        }
+        var observation = _companion?.GetObservation(payload.Radius);
+        var success = observation is not null;
+        WriteActionResult(request.RequestId!, "observe", actorId, success, success ? new { observation } : null, success ? null : new ErrorDetail { Code = "world_not_ready", Message = "the companion is not spawned" });
+        Archive(processingPath);
+    }
+
+    private void ExecuteInventory(Envelope<JsonElement> request, string processingPath)
+    {
+        if (!TryValidateActor(request, "get_inventory", out var actorId))
+        {
+            Archive(processingPath);
+            return;
+        }
+        var inventory = _companion?.GetInventory();
+        var success = inventory is not null && _companion?.IsSpawned == true;
+        WriteActionResult(request.RequestId!, "get_inventory", actorId, success, success ? new { inventory } : null, success ? null : new ErrorDetail { Code = "world_not_ready", Message = "the companion is not spawned" });
+        Archive(processingPath);
+    }
+
+    private void ExecuteAttack(Envelope<JsonElement> request, string processingPath)
+    {
+        if (!TryValidateActor(request, "attack", out var actorId))
+        {
+            Archive(processingPath);
+            return;
+        }
+        object? data = null;
+        ErrorDetail? error = null;
+        var success = _companion is not null && _companion.TryAttack(out data, out error);
+        WriteActionResult(request.RequestId!, "attack", actorId, success, data, error);
+        Archive(processingPath);
+    }
+
+    private void ExecuteCastFishingRod(Envelope<JsonElement> request, string processingPath)
+    {
+        if (!TryValidateActor(request, "cast_fishing_rod", out var actorId))
+        {
+            Archive(processingPath);
+            return;
+        }
+        object? data = null;
+        ErrorDetail? error = null;
+        var success = _companion is not null && _companion.TryCastFishingRod(out data, out error);
+        WriteActionResult(request.RequestId!, "cast_fishing_rod", actorId, success, data, error);
+        Archive(processingPath);
+    }
+
+    private void ExecuteSetAutoCombat(Envelope<JsonElement> request, string processingPath)
+    {
+        var payload = Deserialize<AutoCombatPayload>(request);
+        if (!TryValidateActor(request, "set_auto_combat", out var actorId))
+        {
+            Archive(processingPath);
+            return;
+        }
+        ErrorDetail? error = null;
+        var success = _companion is not null && _companion.TrySetAutoCombat(payload.Enabled, out error);
+        WriteActionResult(request.RequestId!, "set_auto_combat", actorId, success, new { enabled = payload.Enabled }, error);
+        Archive(processingPath);
+    }
+
+    private void ExecuteEatItem(Envelope<JsonElement> request, string processingPath)
+    {
+        var payload = Deserialize<EatItemPayload>(request);
+        if (!TryValidateActor(request, "eat_item", out var actorId))
+        {
+            Archive(processingPath);
+            return;
+        }
+        object? data = null;
+        ErrorDetail? error = null;
+        var success = _companion is not null && _companion.TryEatItem(payload.Slot, out data, out error);
+        WriteActionResult(request.RequestId!, "eat_item", actorId, success, data, error);
+        Archive(processingPath);
+    }
+
+    private void ExecuteCancel(Envelope<JsonElement> request, string processingPath)
+    {
+        var payload = Deserialize<CancelPayload>(request);
+        if (!TryValidateActor(request, "cancel", out var actorId))
+        {
+            Archive(processingPath);
+            return;
+        }
+        if (!string.Equals(_activeProcessingPath is null ? null : Path.GetFileNameWithoutExtension(_activeProcessingPath), payload.TargetRequestId, StringComparison.OrdinalIgnoreCase))
+        {
+            WriteActionResult(request.RequestId!, "cancel", actorId, false, null, new ErrorDetail { Code = "request_not_active", Message = $"request is not the active movement: {payload.TargetRequestId}" });
+            Archive(processingPath);
+            return;
+        }
+
+        var completion = _moveExecutor?.Cancel("cancelled", "movement cancelled by a new cancel request");
+        FinishMoveIfReady(completion);
+        WriteActionResult(request.RequestId!, "cancel", actorId, true, new { target_request_id = payload.TargetRequestId, cancelled = true }, null);
+        Archive(processingPath);
+    }
+
+    private bool TryValidateActor(Envelope<JsonElement> request, string action, out string actorId)
+    {
+        actorId = ReadString(request.Payload, "actor_id") ?? "";
+        if (string.IsNullOrWhiteSpace(actorId))
+        {
+            WriteFailure(request.RequestId!, "invalid_actor", "actor_id is required", action, null);
+            return false;
+        }
+        if (string.Equals(actorId, CompanionController.Id, StringComparison.OrdinalIgnoreCase))
+            return true;
+        WriteFailure(request.RequestId!, "unsupported_actor", $"only {CompanionController.Id} is available in this demo", action, actorId);
+        return false;
+    }
+
+    private static T Deserialize<T>(Envelope<JsonElement> request)
+    {
+        return JsonSerializer.Deserialize<T>(request.Payload.GetRawText(), Protocol.JsonOptions)
+            ?? throw new JsonException($"{typeof(T).Name} payload is empty");
+    }
+
+    private static string ReadActorId(JsonElement payload)
+    {
+        return ReadString(payload, "actor_id") ?? "";
+    }
+
+    private static string? ReadString(JsonElement payload, string property)
+    {
+        return payload.TryGetProperty(property, out var element) && element.ValueKind == JsonValueKind.String
+            ? element.GetString()
+            : null;
     }
 
     private void WriteMoveResult(MoveCompletion completion)
     {
-        var payload = new MoveResultPayload
+        WriteResult(completion.RequestId, new MoveResultPayload
         {
             ActorId = CompanionController.Id,
             Status = completion.Status,
+            Action = completion.Action,
             Direction = completion.Direction,
             Ticks = completion.Ticks,
+            TargetTile = completion.TargetTile,
             BeforeTile = completion.BeforeTile,
             AfterTile = completion.AfterTile,
             Moved = completion.Moved,
             WorldReady = completion.WorldReady,
             Error = completion.Error
-        };
-        WriteResult(completion.RequestId, payload);
+        });
     }
 
-    private void WriteFailure(string requestId, string code, string message)
+    private void WriteActionResult(string requestId, string action, string actorId, bool success, object? data, ErrorDetail? error)
+    {
+        WriteResult(requestId, new ActionResultPayload
+        {
+            Status = success ? "succeeded" : "failed",
+            Action = action,
+            ActorId = actorId,
+            Data = data,
+            Error = error
+        });
+    }
+
+    private void WriteFailure(string requestId, string code, string message, string? action, string? actorId)
     {
         WriteResult(requestId, new ErrorPayload
         {
+            Action = action,
+            ActorId = actorId,
             Error = new ErrorDetail { Code = code, Message = message }
         });
     }
@@ -254,7 +538,6 @@ internal sealed class ModEntry : Mod
     {
         if (_store is null)
             return;
-
         var result = Protocol.CreateEnvelope("action.result", requestId, payload);
         _store.WriteJson(Path.Combine(_store.Paths.Results, $"{requestId}.json"), result);
     }
@@ -266,7 +549,7 @@ internal sealed class ModEntry : Mod
             LatestWriteSequence = _latestWriteSequence,
             SnapshotSequence = snapshotSequence,
             SnapshotIndex = snapshotIndex,
-            ModVersion = this.ModManifest.Version.ToString(),
+            ModVersion = ModManifest.Version.ToString(),
             GameTick = _modTick,
             WorldReady = Context.IsWorldReady,
             Game = Context.IsWorldReady ? new GameInfo
@@ -274,16 +557,21 @@ internal sealed class ModEntry : Mod
                 Year = Game1.year,
                 Season = Game1.currentSeason,
                 Day = Game1.dayOfMonth,
-                Time = Game1.timeOfDay
+                Time = Game1.timeOfDay,
+                Location = Game1.currentLocation?.Name ?? "",
+                Weather = GetWeather()
             } : null,
             Player = Context.IsWorldReady && Game1.player is not null ? new PlayerInfo
             {
-                Location = Game1.currentLocation?.Name ?? "",
-                Tile = new TileDto
-                {
-                    X = (int)Game1.player.Tile.X,
-                    Y = (int)Game1.player.Tile.Y
-                }
+                Name = Game1.player.Name,
+                Location = Game1.player.currentLocation?.Name ?? "",
+                Tile = new TileDto { X = (int)Game1.player.Tile.X, Y = (int)Game1.player.Tile.Y },
+                FacingDirection = FacingName(Game1.player.FacingDirection),
+                Health = Game1.player.health,
+                MaxHealth = Game1.player.maxHealth,
+                Stamina = Game1.player.Stamina,
+                MaxStamina = Game1.player.MaxStamina,
+                Money = Game1.player.Money
             } : null,
             Companion = _companion?.GetInfo()
         };
@@ -293,10 +581,8 @@ internal sealed class ModEntry : Mod
     {
         if (_store is null)
             return;
-
         if (advanceSequence)
             _latestWriteSequence++;
-
         var latest = Protocol.CreateEnvelope("snapshot", null, BuildSnapshot(_snapshotSequence, _latestSnapshotIndex));
         _store.ReplaceJson(Path.Combine(_store.Paths.Snapshots, "snapshot-latest.json"), latest);
     }
@@ -305,23 +591,33 @@ internal sealed class ModEntry : Mod
     {
         if (_store is null)
             return;
-
         _snapshotSequence++;
-        // Publishing a new history index also publishes a new latest state.
-        // Keep the write sequence monotonic so `watch` observes this update
-        // even when the two configured intervals do not align.
         _latestWriteSequence++;
         _latestSnapshotIndex = (_latestSnapshotIndex + 1) % _snapshotHistoryLimit;
-        var snapshot = Protocol.CreateEnvelope(
-            "snapshot",
-            null,
-            BuildSnapshot(_snapshotSequence, _latestSnapshotIndex));
-        _store.ReplaceJson(
-            Path.Combine(_store.Paths.Snapshots, $"snapshot-{_latestSnapshotIndex}.json"),
-            snapshot);
-
-        // latest is the complete newest state, and also publishes the newest ring index.
+        var snapshot = Protocol.CreateEnvelope("snapshot", null, BuildSnapshot(_snapshotSequence, _latestSnapshotIndex));
+        _store.ReplaceJson(Path.Combine(_store.Paths.Snapshots, $"snapshot-{_latestSnapshotIndex}.json"), snapshot);
         WriteLatestSnapshot(advanceSequence: false);
+    }
+
+    private static string GetWeather()
+    {
+        if (Game1.isLightning) return "storm";
+        if (Game1.isRaining) return "rain";
+        if (Game1.isSnowing) return "snow";
+        if (Game1.isDebrisWeather) return "windy";
+        return "sunny";
+    }
+
+    private static string FacingName(int direction)
+    {
+        return direction switch
+        {
+            0 => "up",
+            1 => "right",
+            2 => "down",
+            3 => "left",
+            _ => "down"
+        };
     }
 
     private void Archive(string processingPath)

@@ -8,10 +8,14 @@ use clap::Parser;
 struct Args {
     #[arg(long)]
     bridge_dir: PathBuf,
+    #[arg(long, alias = "snapshot-interval-ms", default_value_t = 1_000)]
+    latest_interval_ms: u64,
     #[arg(long, default_value_t = 1_000)]
-    snapshot_interval_ms: u64,
+    snapshot_history_interval_ms: u64,
     #[arg(long)]
     once: bool,
+    #[arg(long, default_value_t = 10)]
+    snapshot_history_limit: usize,
 }
 
 fn main() -> ExitCode {
@@ -26,5 +30,11 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     let args = Args::parse();
-    stardew_cli::fake::run(args.bridge_dir, args.snapshot_interval_ms, args.once)
+    stardew_cli::fake::run(
+        args.bridge_dir,
+        args.latest_interval_ms,
+        args.snapshot_history_interval_ms,
+        args.once,
+        args.snapshot_history_limit,
+    )
 }

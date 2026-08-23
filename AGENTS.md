@@ -24,3 +24,39 @@
 - 参考项目只用于阅读、对比和实验，不要直接在 `temp/` 中积累 Stardew Agent 的正式实现。
 - 正式代码、测试、配置和文档放在本仓库内，并保持路径可被 GitHub 访问。
 - 修改已有文档时保持无关内容稳定；新增文档时先更新目录或索引，再补充正文。
+
+## 构建与验证
+
+### Rust CLI
+
+- Rust CLI 的基础验证命令是 `cargo test --manifest-path cli/Cargo.toml` 和 `cargo build --manifest-path cli/Cargo.toml --release`。
+- 提交前运行 `git diff --check`，检查空白字符和补丁格式问题。
+- `cargo fmt --all -- --check` 仅在本机安装了 `rustfmt` 时运行；如果缺少该组件，应明确记录为环境限制，不要把它误报成代码编译失败。
+
+### SMAPI Mod
+
+- `smapi-mod/StardewAgentMod.csproj` 当前以 `net6.0` 为目标框架，对应 Stardew Valley 1.6/SMAPI 的运行时兼容目标；本机安装的 SDK 版本与项目目标框架是两个概念。
+- 标准构建命令为：
+
+  ```bash
+  dotnet build smapi-mod/StardewAgentMod.csproj --configuration Release
+  ```
+
+- ModBuildConfig 需要能够定位游戏目录或等价的参考程序集目录。如果自动探测不到游戏，使用 `-p:GamePath="<game-or-reference-assemblies-directory>"`；占位路径只在本地命令中替换，不能把本机绝对路径写进仓库文档。
+- 不需要启动游戏即可做编译验证。没有游戏安装时，使用官方 [Stardew Valley/SMAPI 参考程序集](https://github.com/StardewModders/mod-reference-assemblies/blob/main/docs/README.md)，或使用官方 [SMAPI-ModBuildWorkflow](https://github.com/Pathoschild/SMAPI-ModBuildWorkflow) 创建包含参考程序集的构建目录。例如：
+
+  ```bash
+  dotnet build smapi-mod/StardewAgentMod.csproj \
+    --configuration Release \
+    -p:GamePath="<reference-assemblies-directory>"
+  ```
+
+- 根目录的 `Directory.Build.props` 将发布压缩包输出到 `_releases/`，并关闭自动部署；构建产物不会自动安装到本机游戏目录。
+- `bin/`、`obj/` 和 `_releases/` 是构建生成物，除非任务明确要求，否则不应提交。
+
+### CI 与验证边界
+
+- `.github/workflows/build-demo.yml` 中，Windows job 验证 CLI，SMAPI job 使用官方构建环境验证 Mod；`main` 分支 push 或手动运行会更新固定的 `latest` 开发版 GitHub Release，PR 只做构建检查。Actions artifact 是 job 间传递和失败排查用的中间产物，不等同于 Release 下载资产。
+- 参考程序集可以验证 C# 编译和 Mod 包结构，但不能证明 Mod 在真实游戏中的行为正确。涉及事件、地图、角色移动、存档或文件通信的改动，仍需在 Windows + SMAPI + Stardew Valley 中做运行验证。
+- 本地构建出现警告时要单独分类。例如 .NET 6 SDK 可能报告分析器编译器版本不匹配的 `CS9057`；只要构建结果明确为成功且无错误，就不能把该警告描述成编译失败，但也不要声称已经完成运行时验证。
+- 本地环境缺少游戏或参考程序集时，可以依靠 CI 做编译门禁；应分别报告 Rust 编译、C# 编译、打包检查和真实游戏运行验证的结果，不能用其中一项代替其他项。
