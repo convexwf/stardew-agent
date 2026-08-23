@@ -46,6 +46,7 @@ jobs:
         with:
           name: stardew-agent-cli-${{ matrix.name }}-${{ github.run_number }}
           path: artifact/
+          retention-days: 3
 
   build-smapi-mod:
     name: Build SMAPI Mod
@@ -66,6 +67,7 @@ jobs:
           name: stardew-agent-mod-${{ github.run_number }}
           path: _releases/*.zip
           if-no-files-found: error
+          retention-days: 3
 
   release-latest:
     name: Update latest GitHub Release
