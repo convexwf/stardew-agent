@@ -32,9 +32,7 @@
 3. [StarDojo](stardojo.md)：环境封装、Observation/Action、任务和评测。
 4. [Stardew Valley BotFramework](stardew-valley-bot-framework.md)：Target、Action、Brain 和游戏内行为调度。
 5. [Farmtronics](farmtronics.md)：游戏内可编程 Bot、脚本 API 和 Bot 状态。
-6. SMAPI：Mod 加载、事件、API、构建和运行基础。
-
-尚未出现链接的项目档案尚未撰写；完成一篇后再把链接加入本 README。
+6. [SMAPI](smapi.md)：Mod 加载、事件、API、构建和运行基础。
 
 ## 项目状态
 
@@ -45,7 +43,7 @@
 | StarDojo | [stardojo.md](stardojo.md) | `e251401c` | 已完成 |
 | Stardew Valley BotFramework | [stardew-valley-bot-framework.md](stardew-valley-bot-framework.md) | `252d2849` | 已完成 |
 | Farmtronics | [farmtronics.md](farmtronics.md) | `a59fc65b` | 已完成 |
-| SMAPI | `smapi.md` | `79f9bbbe` | 待撰写 |
+| SMAPI | [smapi.md](smapi.md) | `79f9bbbe` | 已完成 |
 
 ## 统一记录范围
 
