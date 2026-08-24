@@ -28,7 +28,7 @@
 项目档案按与真实 Stardew Valley 控制链路的接近程度以及抽象层次排列：
 
 1. [StardewValley-MCP](stardewvalley-mcp.md)：Companion、Shadow Farmer、Player Mode 和 JSON 文件 Bridge。
-2. StardewMCP：真实游戏 Mod、WebSocket、Go 客户端、状态序列化和寻路。
+2. [StardewMCP](stardew-mcp.md)：真实游戏 Mod、WebSocket、Go 客户端、状态序列化和寻路。
 3. StarDojo：环境封装、Observation/Action、任务和评测。
 4. Stardew Valley BotFramework：Target、Action、Brain 和游戏内行为调度。
 5. Farmtronics：游戏内可编程 Bot、脚本 API 和 Bot 状态。
@@ -41,7 +41,7 @@
 | 项目 | 文件 | 固定参考提交 | 状态 |
 | ---- | ---- | ------------ | ---- |
 | StardewValley-MCP | [stardewvalley-mcp.md](stardewvalley-mcp.md) | `6cb2ffa` | 已完成 |
-| StardewMCP | `stardew-mcp.md` | `3ca54bb` | 待撰写 |
+| StardewMCP | [stardew-mcp.md](stardew-mcp.md) | `3ca54bb` | 已完成 |
 | StarDojo | `stardojo.md` | `e251401c` | 待撰写 |
 | Stardew Valley BotFramework | `stardew-valley-bot-framework.md` | `252d2849` | 待撰写 |
 | Farmtronics | `farmtronics.md` | `a59fc65b` | 待撰写 |
