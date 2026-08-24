@@ -5,9 +5,9 @@
 | 项目         | 内容 |
 | ------------ | ---- |
 | **文档标题** | Stardew Agent 调研资料索引 |
-| **文档版本** | v0.4 |
+| **文档版本** | v0.5 |
 | **创建日期** | 2026-08-23 |
-| **更新日期** | 2026-08-23 |
+| **更新日期** | 2026-08-25 |
 | **文档作者** | 项目维护者 |
 | **文档类型** | 技术调研索引 |
 | **参考资料** | 参考项目的上游网页链接，见[参考项目](#参考项目) |
@@ -38,20 +38,22 @@
 文件名不使用数字前缀，阅读顺序在这里统一维护：
 
 1. [`communication-architecture.md`](communication-architecture.md)：查看参考项目中的游戏进程、Mod 和外部进程通信方式。
-2. [`existing-projects.md`](existing-projects.md)：查看各参考项目的组件、接口和运行边界。
-3. [`observation-action-contract.md`](observation-action-contract.md)：比较不同项目中的 Observation、Action 和 Result 表达方式。
-4. [`action-execution-and-pathfinding.md`](action-execution-and-pathfinding.md)：查看动作队列、寻路、等待、校验和失败处理的实际实现。
-5. [`agent-loop-and-evaluation.md`](agent-loop-and-evaluation.md)：查看任务循环、任务配置、轨迹记录和评测指标的实际实现。
-6. [`llm-and-rl-boundary.md`](llm-and-rl-boundary.md)：查看参考项目中 LLM、规则、搜索和 RL 的使用边界与实验条件。
-7. [`development-stage-observations.md`](development-stage-observations.md)：查看参考项目公开资料中的开发阶段和依赖，不形成 Stardew Agent 路线。
+2. [`reference-projects/README.md`](reference-projects/README.md)：进入按项目拆分的详细档案，先阅读最接近 Companion 控制链路的 StardewValley-MCP。
+3. [`existing-projects.md`](existing-projects.md)：查看各参考项目的组件、接口和运行边界总览。
+4. [`observation-action-contract.md`](observation-action-contract.md)：比较不同项目中的 Observation、Action 和 Result 表达方式。
+5. [`action-execution-and-pathfinding.md`](action-execution-and-pathfinding.md)：查看动作队列、寻路、等待、校验和失败处理的实际实现。
+6. [`agent-loop-and-evaluation.md`](agent-loop-and-evaluation.md)：查看任务循环、任务配置、轨迹记录和评测指标的实际实现。
+7. [`llm-and-rl-boundary.md`](llm-and-rl-boundary.md)：查看参考项目中 LLM、规则、搜索和 RL 的使用边界与实验条件。
+8. [`development-stage-observations.md`](development-stage-observations.md)：查看参考项目公开资料中的开发阶段和依赖，不形成 Stardew Agent 路线。
 
-前两篇提供项目和通信背景；第三至第六篇分别记录状态、动作、执行、评测和模型资料；最后一篇只整理参考项目公开的阶段性信息。
+项目档案索引提供单项目事实背景；其后总览和主题报告分别记录项目矩阵、状态、动作、执行、评测和模型资料；最后一篇只整理参考项目公开的阶段性信息。
 
 ## 报告清单
 
 | 文件 | 调研主题 | 内容范围 | 状态 |
 | ---- | -------- | -------- | ---- |
 | [`communication-architecture.md`](communication-architecture.md) | 游戏通信实现 | StardewMCP、StarDojo 的链路、协议和传输特征 | 已完成 |
+| [`reference-projects/README.md`](reference-projects/README.md) | 单项目详细档案 | 按项目记录固定版本、架构、通信、控制对象和资料限制 | 首篇完成，持续补充 |
 | [`existing-projects.md`](existing-projects.md) | 参考项目实现 | 组件、运行方式、接口和限制对比 | 已完成 |
 | [`observation-action-contract.md`](observation-action-contract.md) | 状态与动作表达 | Observation、Action、Result 的字段和粒度差异 | 已完成 |
 | [`action-execution-and-pathfinding.md`](action-execution-and-pathfinding.md) | 动作执行实现 | 执行队列、寻路、等待、校验和失败处理 | 已完成 |
