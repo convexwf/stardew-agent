@@ -93,19 +93,23 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p release-assets cli-assets
+          mkdir -p release-assets release-package mod-unpacked
 
           mod_zip="$(find artifacts -type f -name '*.zip' -print -quit)"
           test -n "$mod_zip"
-          cp "$mod_zip" release-assets/stardew-agent-mod.zip
+          unzip -q "$mod_zip" -d mod-unpacked
+          manifest="$(find mod-unpacked -type f -name 'manifest.json' -print -quit)"
+          test -n "$manifest"
+          mod_root="$(dirname "$manifest")"
+          cp -R "$mod_root"/. release-package/
 
           cli="$(find artifacts -type f -name 'stardew-cli.exe' -print -quit)"
           fake_mod="$(find artifacts -type f -name 'fake-mod.exe' -print -quit)"
           test -n "$cli"
           test -n "$fake_mod"
-          cp "$cli" cli-assets/stardew-cli.exe
-          cp "$fake_mod" cli-assets/fake-mod.exe
-          (cd cli-assets && zip -q ../release-assets/stardew-agent-cli-windows.zip stardew-cli.exe fake-mod.exe)
+          cp "$cli" release-package/stardew-cli.exe
+          cp "$fake_mod" release-package/fake-mod.exe
+          (cd release-package && zip -qr ../release-assets/stardew-agent-windows.zip .)
 
           ls -la release-assets
 
@@ -122,7 +126,6 @@ jobs:
           prerelease: true
           overwrite_files: true
           files: |
-            release-assets/stardew-agent-cli-windows.zip
-            release-assets/stardew-agent-mod.zip
+            release-assets/stardew-agent-windows.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

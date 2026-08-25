@@ -4,6 +4,8 @@
 
 Companion 由可见 NPC 和隐藏 shadow farmer 组成：NPC 负责画面中的位置和寻路，shadow farmer 持有物品并调用 Farmer、Tool、Item 等游戏机制。它不是原版联机 Farmhand，不需要启动第二个游戏客户端。
 
+当前 Demo 保留逻辑名称 `companion-1`，并通过 SMAPI `AssetRequested` 将 `Portraits/companion-1` 临时映射到游戏已有的 Abigail 头像。该头像只是通信和生成验证阶段的占位资源，后续可以替换为 Mod 自带的自定义 portrait，不改变 CLI、状态扫描或动作路由。
+
 ## 支持的动作
 
 Mod 当前处理以下 `payload.action`：
@@ -43,7 +45,13 @@ CLI 与协议字段、结果示例和完整链路见 [`doc/demo/cli-file-bridge.
 
 历史文件使用固定槽位轮转。例如限制为 3 时，文件只会是 `snapshot-0.json`、`snapshot-1.json` 和 `snapshot-2.json`，写到末尾后重新覆盖 `snapshot-0.json`。`snapshot-latest.json` 始终保存完整最新状态，并记录最近历史快照的 `snapshot_index`，不是只保存一个指针。
 
-也可以把 `BridgeDirectory` 改为绝对路径。Windows 上 CLI 使用同一个目录：
+也可以把 `BridgeDirectory` 改为绝对路径。Windows 上，合并发布包中的 CLI 会默认使用自身所在目录下的 `bridge/`，无需额外参数：
+
+```text
+path\to\stardew-cli.exe status
+```
+
+如果 CLI 与 Mod 分开放置，则使用同一个绝对路径：
 
 ```text
 stardew-cli.exe --bridge-dir "D:\stardew-agent-bridge" status

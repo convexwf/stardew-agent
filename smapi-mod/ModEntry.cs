@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Xna.Framework.Graphics;
 using StardewModdingAPI;
 using StardewModdingAPI.Events;
 using StardewValley;
@@ -55,8 +56,19 @@ internal sealed class ModEntry : Mod
         helper.Events.GameLoop.DayStarted += OnDayStarted;
         helper.Events.GameLoop.DayEnding += OnDayEnding;
         helper.Events.GameLoop.ReturnedToTitle += OnReturnedToTitle;
+        helper.Events.Content.AssetRequested += OnAssetRequested;
 
         Monitor.Log($"Loaded. Bridge directory: {paths.Root}. AI actor: {CompanionController.Id}.", LogLevel.Info);
+    }
+
+    private void OnAssetRequested(object? sender, AssetRequestedEventArgs e)
+    {
+        if (!e.NameWithoutLocale.IsEquivalentTo($"Portraits/{CompanionController.Id}"))
+            return;
+
+        e.LoadFrom(
+            () => Helper.GameContent.Load<Texture2D>("Portraits/Abigail"),
+            AssetLoadPriority.Exclusive);
     }
 
     private void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)

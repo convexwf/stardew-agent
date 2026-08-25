@@ -383,6 +383,43 @@ fn cli_reads_state_and_bridge_diagnostics_as_json() {
 }
 
 #[test]
+fn cli_defaults_to_bridge_next_to_executable() {
+    let root = std::env::temp_dir().join(format!("stardew-agent-cli-default-{}", Uuid::new_v4()));
+    let bridge = Bridge::new(root.join("bridge"));
+    bridge.ensure_layout().unwrap();
+    let snapshot = Envelope {
+        schema_version: SCHEMA_VERSION.to_owned(),
+        message_type: "snapshot".to_owned(),
+        request_id: None::<String>,
+        created_at_ms: now_ms(),
+        payload: json!({
+            "latest_write_sequence": 1,
+            "snapshot_sequence": 1,
+            "snapshot_index": 0,
+            "world_ready": true,
+            "game": {"location": "Farm"},
+            "player": {"name": "Player"},
+            "companion": {"id": COMPANION_ID}
+        }),
+    };
+    bridge.write_snapshot(1, 1, &snapshot, 1).unwrap();
+
+    let source_cli = std::path::Path::new(env!("CARGO_BIN_EXE_stardew-cli"));
+    let cli_path = root.join(source_cli.file_name().unwrap());
+    fs::copy(source_cli, &cli_path).unwrap();
+    let output = Command::new(&cli_path)
+        .current_dir(std::env::temp_dir())
+        .arg("status")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "CLI stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["payload"]["game"]["location"], "Farm");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn cli_writes_actions_through_fake_mod() {
     let _lock = fake_mod_lock();
     for (arguments, action_name) in [

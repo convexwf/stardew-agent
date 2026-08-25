@@ -228,9 +228,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    let bridge_dir = cli
-        .bridge_dir
-        .context("missing --bridge-dir or STARDEW_BRIDGE_DIR")?;
+    let bridge_dir = cli.bridge_dir.unwrap_or(default_bridge_dir()?);
     let bridge = Bridge::new(bridge_dir);
     bridge.ensure_layout()?;
 
@@ -438,6 +436,14 @@ fn run() -> Result<()> {
         ),
         Command::Watch { interval_ms } => watch(&bridge, interval_ms),
     }
+}
+
+fn default_bridge_dir() -> Result<PathBuf> {
+    let executable = std::env::current_exe().context("resolve CLI executable path")?;
+    let executable_dir = executable
+        .parent()
+        .context("resolve CLI executable directory")?;
+    Ok(executable_dir.join("bridge"))
 }
 
 fn print_latest(bridge: &Bridge) -> Result<()> {

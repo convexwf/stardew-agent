@@ -30,6 +30,7 @@
 ### Rust CLI
 
 - Rust CLI 的基础验证命令是 `cargo test --manifest-path cli/Cargo.toml` 和 `cargo build --manifest-path cli/Cargo.toml --release`。
+- CLI 未指定 `--bridge-dir` 且未设置 `STARDEW_BRIDGE_DIR` 时，使用 CLI 可执行文件所在目录下的 `bridge/`，不依赖启动时的工作目录；合并发布包让 CLI 与 Mod 文件共用该目录。
 - 提交前运行 `git diff --check`，检查空白字符和补丁格式问题。
 - `cargo fmt --all -- --check` 仅在本机安装了 `rustfmt` 时运行；如果缺少该组件，应明确记录为环境限制，不要把它误报成代码编译失败。
 
@@ -57,6 +58,7 @@
 ### CI 与验证边界
 
 - `.github/workflows/build-demo.yml` 中，Windows job 验证 CLI，SMAPI job 使用官方构建环境验证 Mod；`main` 分支 push 或手动运行会更新固定的 `latest` 开发版 GitHub Release，PR 只做构建检查。Actions artifact 是 job 间传递和失败排查用的中间产物，不等同于 Release 下载资产。
+- Release 对外只提供一个合并的 Windows 压缩包，其中包含 CLI 可执行文件和 SMAPI Mod 文件；job 间的 Actions artifact 仍仅用于传递和排查。
 - 参考程序集可以验证 C# 编译和 Mod 包结构，但不能证明 Mod 在真实游戏中的行为正确。涉及事件、地图、角色移动、存档或文件通信的改动，仍需在 Windows + SMAPI + Stardew Valley 中做运行验证。
 - 本地构建出现警告时要单独分类。例如 .NET 6 SDK 可能报告分析器编译器版本不匹配的 `CS9057`；只要构建结果明确为成功且无错误，就不能把该警告描述成编译失败，但也不要声称已经完成运行时验证。
 - 本地环境缺少游戏或参考程序集时，可以依靠 CI 做编译门禁；应分别报告 Rust 编译、C# 编译、打包检查和真实游戏运行验证的结果，不能用其中一项代替其他项。

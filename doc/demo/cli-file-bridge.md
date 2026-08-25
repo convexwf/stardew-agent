@@ -5,7 +5,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | **文档标题** | CLI 工具系统通信 Demo 技术实现方案 |
-| **文档版本** | v0.9 |
+| **文档版本** | v0.11 |
 | **创建日期** | 2026-08-23 |
 | **更新日期** | 2026-08-25 |
 | **文档类型** | 技术实现方案 |
@@ -48,6 +48,14 @@ Companion 由两个对象组成：
 - 隐藏 `BotFarmer`：持有物品，并作为工具、战斗、钓鱼和交互等游戏 API 的调用主体。
 
 主农场主不是 CLI 的动作目标。主农场主信息会进入状态快照，作为环境信息提供给外部调用方。
+
+### Companion 资源占位
+
+Companion 的逻辑名称固定为 `companion-1`，这个名称同时用于 CLI 的 `actor_id`、状态扫描和动作路由，不能为了修复游戏资源加载而改成原版 NPC 名称。
+
+当前 Demo 尚未提供自定义头像资源。由于 Stardew Valley 会根据 NPC 名称尝试加载 `Portraits/companion-1`，Mod 在 SMAPI 的 `AssetRequested` 事件中临时将该资源映射到游戏已有的 `Portraits/Abigail`。这是为了先验证 Companion 的生成和通信链路，不表示 Companion 的最终人物形象，也不改变其逻辑身份。
+
+后续设计自己的头像时，只需将该映射的返回资源替换为 Mod 自带的 portrait 文件，并保留 `Portraits/companion-1` 这个资源键；如果替换行走动画，也应以同样方式注册 `Characters/companion-1`，不改动 CLI 和 Bridge 协议。
 
 ## 当前实现范围
 
@@ -182,7 +190,9 @@ Rust 和 C# 各自维护协议 DTO。字段名通过 JSON 属性保持一致；�
 
 ## Bridge 目录与文件语义
 
-Bridge 目录由 Mod 配置的 `BridgeDirectory` 指定，CLI 通过 `--bridge-dir` 或 `STARDEW_BRIDGE_DIR` 使用同一目录。
+Bridge 目录由 Mod 配置的 `BridgeDirectory` 指定。CLI 优先使用 `--bridge-dir`，其次使用 `STARDEW_BRIDGE_DIR`；两者都未提供时，默认使用 CLI 可执行文件所在目录下的 `bridge/`，与启动 CLI 时的工作目录无关。
+
+合并发布包中 CLI 与 Mod 文件位于同一目录时，CLI 可执行文件旁边的 `bridge/` 与 Mod 默认的 `bridge/` 就是同一个目录。即使从其他工作目录启动 CLI，仍会使用这个位置；只有把 CLI 和 Mod 分开放置时，才需要显式指定 `--bridge-dir` 或设置 `STARDEW_BRIDGE_DIR`。
 
 ```text
 bridge/
@@ -390,10 +400,10 @@ snapshot-0.json → snapshot-1.json → snapshot-2.json
 所有命令都支持：
 
 ```text
-stardew-cli --bridge-dir <bridge-directory> <command>
+stardew-cli [--bridge-dir <bridge-directory>] <command>
 ```
 
-也可以设置 `STARDEW_BRIDGE_DIR`，省略全局参数。输出统一为 JSON；动作结果为失败状态时，CLI 同时打印结果并以非零退出码结束。
+也可以设置 `STARDEW_BRIDGE_DIR`，省略全局参数。没有参数或环境变量时，CLI 使用自身可执行文件所在目录下的 `bridge/`。输出统一为 JSON；动作结果为失败状态时，CLI 同时打印结果并以非零退出码结束。
 
 ### 状态、观察和诊断
 
@@ -454,6 +464,7 @@ Mod 订阅以下事件：
 | `DayStarted` | 重置 shadow farmer 的睡眠状态和基础资源 |
 | `DayEnding` | 向 shadow farmer 发出睡眠就绪信号 |
 | `ReturnedToTitle` | 取消正在执行的移动并清理可见 Companion |
+| `AssetRequested` | 将当前 Demo 的 `Portraits/companion-1` 临时映射到 `Portraits/Abigail` |
 
 ### 请求处理
 
@@ -548,15 +559,18 @@ stardew-cli result show <request-id>
 
 工作流文件是 `.github/workflows/build-demo.yml`，负责构建 CLI、构建 SMAPI Mod，并更新一个固定的 `latest` 开发版 GitHub Release。Actions artifact 仍然作为 job 间传递和失败排查用的中间产物。
 
-Release 中提供两个稳定命名的下载资产：
+Release 中提供一个稳定命名的 Windows 下载资产，CLI 和 SMAPI Mod 位于同一个压缩包中：
 
 ```text
 latest/
-├── stardew-agent-cli-windows.zip
-│   ├── stardew-cli.exe
-│   └── fake-mod.exe
-└── stardew-agent-mod.zip
+└── stardew-agent-windows.zip
+    ├── manifest.json
+    ├── StardewAgentMod.dll
+    ├── stardew-cli.exe
+    └── fake-mod.exe
 ```
+
+将压缩包内容放入同一个目录后，可以把该目录作为 SMAPI Mod 目录。CLI 默认使用自身旁边的 `bridge/`，与 Mod 默认的 `bridge/` 保持一致，不要求从该目录启动命令行。
 
 构建 job 的中间 artifact 结构为：
 
@@ -590,9 +604,9 @@ Mod 项目目标框架为 `net6.0`。Mac 可以安装 .NET SDK 编译 C# 工程�
 每次完整验证需要：
 
 1. 用 SMAPI 启动 Stardew Valley 并进入存档；
-2. 将 `StardewAgentMod` zip 放入游戏的 `Mods` 目录；
-3. 在 Mod 配置中确认 `BridgeDirectory`；
-4. 在同一目录下运行 Windows CLI；
+2. 将合并发布包中的全部文件放入游戏的 `Mods/StardewAgentMod` 目录；
+3. 直接运行其中的 `stardew-cli.exe`，CLI 会使用自身旁边的 `bridge/`；
+4. 如果 CLI 与 Mod 分开放置，在 Mod 配置中设置相同的 `BridgeDirectory`，或给 CLI 指定 `--bridge-dir`；
 5. 依次验证 `status`、`ping`、`observe`、`inventory`、`move-to`、`use-tool` 和 `interact`；
 6. 对传送、战斗、钓鱼和自动战斗分别在满足游戏前置条件的场景验证；
 7. 用 `snapshot list`、`doctor` 和 `request/result show` 检查文件轮转与请求生命周期。
