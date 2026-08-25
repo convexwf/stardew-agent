@@ -101,12 +101,11 @@ internal sealed class CompanionNpc : NPC
         var bottomY = localPosition.Y - 32f - Sprite.SpriteHeight * 4f;
         var left = (int)Math.Round(centerX - bubbleWidth / 2f);
         var top = (int)Math.Round(bottomY - bubbleHeight - tailHeight);
-        var border = new Rectangle(left - 2, top - 2, bubbleWidth + 4, bubbleHeight + 4);
         var background = new Rectangle(left, top, bubbleWidth, bubbleHeight);
 
         const float layerDepth = 0.9999f;
-        DrawPixel(b, border, Color.Black * 0.85f, layerDepth);
         DrawPixel(b, background, Color.White * 0.95f, layerDepth);
+        DrawBubbleBorder(b, left, top, bubbleWidth, bubbleHeight, Color.Black * 0.85f, layerDepth);
 
         var tailX = (int)Math.Round(centerX);
         DrawPixel(b, new Rectangle(tailX - 5, top + bubbleHeight, 10, 4), Color.Black * 0.85f, layerDepth);
@@ -121,6 +120,15 @@ internal sealed class CompanionNpc : NPC
             );
             b.DrawString(font, lines[index], position, Color.Black, 0f, Vector2.Zero, 1f, SpriteEffects.None, layerDepth);
         }
+    }
+
+    private void DrawBubbleBorder(SpriteBatch b, int left, int top, int width, int height, Color color, float layerDepth)
+    {
+        const int border = 2;
+        DrawPixel(b, new Rectangle(left - border, top - border, width + border * 2, border), color, layerDepth);
+        DrawPixel(b, new Rectangle(left - border, top + height, width + border * 2, border), color, layerDepth);
+        DrawPixel(b, new Rectangle(left - border, top, border, height), color, layerDepth);
+        DrawPixel(b, new Rectangle(left + width, top, border, height), color, layerDepth);
     }
 
     private void DrawPixel(SpriteBatch b, Rectangle destination, Color color, float layerDepth)
