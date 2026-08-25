@@ -43,7 +43,34 @@ internal sealed class CompanionNpc : NPC
 
     public override void draw(SpriteBatch b, float alpha = 1f)
     {
-        base.draw(b, alpha);
+        if (Sprite?.Texture is null || IsInvisible)
+            return;
+
+        var baseScale = Math.Max(0.2f, scale.Value) * 4f;
+        var drawScale = new Vector2(baseScale);
+        var localPosition = getLocalPosition(Game1.viewport);
+        var widthOffset = GetSpriteWidthForPositioning() * 4f / 2f;
+        var heightOffset = GetBoundingBox().Height / 2f;
+        var screenPosition = localPosition + new Vector2(widthOffset, heightOffset);
+        var origin = new Vector2(Sprite.SpriteWidth / 2f, Sprite.SpriteHeight * 3f / 4f);
+        var layerDepth = Math.Max(0f, drawOnTop ? 0.991f : StandingPixel.Y / 10000f);
+        var effects = flip
+            || (Sprite.CurrentAnimation is not null
+                && Sprite.currentAnimationIndex < Sprite.CurrentAnimation.Count
+                && Sprite.CurrentAnimation[Sprite.currentAnimationIndex].flip)
+            ? SpriteEffects.FlipHorizontally
+            : SpriteEffects.None;
+
+        b.Draw(
+            Sprite.Texture,
+            screenPosition,
+            Sprite.SourceRect,
+            Color.White * alpha,
+            0f,
+            origin,
+            drawScale,
+            effects,
+            layerDepth);
 
         if (_bubbleText is null || _bubbleTicks <= 0 || Game1.eventUp || Game1.smallFont is null)
             return;

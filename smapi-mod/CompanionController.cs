@@ -46,7 +46,7 @@ internal sealed class CompanionController
             return;
 
         var location = Game1.currentLocation;
-        var position = Game1.player.Position + new Vector2(Game1.tileSize, 0f);
+        var position = FindSpawnPosition(location);
         var portrait = _helper.GameContent.Load<Texture2D>("Portraits/Abigail");
         _visual = new CompanionNpc(
             new AnimatedSprite("Characters\\Abigail", 0, 16, 32),
@@ -80,6 +80,27 @@ internal sealed class CompanionController
             + $"tile ({_visual.Tile.X:0.0},{_visual.Tile.Y:0.0}), visible={!_visual.IsInvisible}, "
             + $"sprite_loaded={_visual.Sprite?.Texture is not null}.",
             LogLevel.Info);
+    }
+
+    private static Vector2 FindSpawnPosition(GameLocation location)
+    {
+        var playerTile = Game1.player.Tile;
+        var candidates = new[]
+        {
+            new Vector2(playerTile.X + 1, playerTile.Y),
+            new Vector2(playerTile.X - 1, playerTile.Y),
+            new Vector2(playerTile.X, playerTile.Y - 1),
+            new Vector2(playerTile.X, playerTile.Y + 1)
+        };
+
+        foreach (var tile in candidates)
+        {
+            var mapTile = new xTile.Dimensions.Location((int)tile.X, (int)tile.Y);
+            if (location.isTilePassable(mapTile, Game1.viewport))
+                return tile * Game1.tileSize;
+        }
+
+        return Game1.player.Position + new Vector2(Game1.tileSize, 0f);
     }
 
     public MoveCompletion? Tick()
