@@ -84,6 +84,7 @@ internal sealed class CompanionController
             return null;
 
         SyncShadow();
+        _visual.TickSpeechBubble();
         TickFishing();
         TickAutoCombat();
 
@@ -421,6 +422,20 @@ internal sealed class CompanionController
         return true;
     }
 
+    public bool TryShowBubble(string text, int durationMs, out ErrorDetail? error)
+    {
+        error = null;
+        EnsureSpawned();
+        if (!IsSpawned || _visual is null || _shadow is null || _visual.currentLocation is null)
+        {
+            error = new ErrorDetail { Code = "world_not_ready", Message = "the companion is not spawned" };
+            return false;
+        }
+
+        _visual.ShowSpeechBubble(text, durationMs);
+        return true;
+    }
+
     public bool TryEatItem(int? slot, out object? data, out ErrorDetail? error)
     {
         data = null;
@@ -513,7 +528,7 @@ internal sealed class CompanionController
             Capabilities = new List<string>
             {
                 "move_relative", "move_to", "face_direction", "use_tool", "interact", "warp_to",
-                "observe", "get_inventory", "attack", "cast_fishing_rod", "set_auto_combat", "eat_item", "cancel"
+                "observe", "get_inventory", "attack", "cast_fishing_rod", "set_auto_combat", "eat_item", "say", "bubble", "cancel"
             }
         };
     }

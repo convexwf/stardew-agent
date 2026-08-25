@@ -269,6 +269,8 @@ fn action_actor_id(payload: &ActionRequestPayload) -> &str {
         | ActionRequestPayload::CastFishingRod { actor_id }
         | ActionRequestPayload::SetAutoCombat { actor_id, .. }
         | ActionRequestPayload::EatItem { actor_id, .. }
+        | ActionRequestPayload::Say { actor_id, .. }
+        | ActionRequestPayload::Bubble { actor_id, .. }
         | ActionRequestPayload::Cancel { actor_id, .. } => actor_id,
     }
 }
@@ -288,6 +290,8 @@ fn action_name(payload: &ActionRequestPayload) -> &'static str {
         ActionRequestPayload::CastFishingRod { .. } => "cast_fishing_rod",
         ActionRequestPayload::SetAutoCombat { .. } => "set_auto_combat",
         ActionRequestPayload::EatItem { .. } => "eat_item",
+        ActionRequestPayload::Say { .. } => "say",
+        ActionRequestPayload::Bubble { .. } => "bubble",
         ActionRequestPayload::Cancel { .. } => "cancel",
     }
 }
@@ -425,6 +429,22 @@ fn execute_request(
             "eat_item",
             &actor_id,
             json!({"slot": slot, "ate": false}),
+        ),
+        ActionRequestPayload::Say { actor_id, text } => succeeded(
+            &request_id,
+            "say",
+            &actor_id,
+            json!({"text": text, "channel": "chat"}),
+        ),
+        ActionRequestPayload::Bubble {
+            actor_id,
+            text,
+            duration_ms,
+        } => succeeded(
+            &request_id,
+            "bubble",
+            &actor_id,
+            json!({"text": text, "channel": "bubble", "duration_ms": duration_ms}),
         ),
         ActionRequestPayload::Cancel {
             actor_id,

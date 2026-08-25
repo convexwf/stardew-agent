@@ -141,6 +141,15 @@ fn fake_mod_supports_companion_read_and_write_actions() {
             actor_id: COMPANION_ID.to_owned(),
             slot: None,
         }, "eat_item"),
+        (ActionRequestPayload::Say {
+            actor_id: COMPANION_ID.to_owned(),
+            text: "I am ready to help.".to_owned(),
+        }, "say"),
+        (ActionRequestPayload::Bubble {
+            actor_id: COMPANION_ID.to_owned(),
+            text: "I am above the Companion.".to_owned(),
+            duration_ms: 3_000,
+        }, "bubble"),
         (ActionRequestPayload::Cancel {
             actor_id: COMPANION_ID.to_owned(),
             target_request_id: "missing-request".to_owned(),
@@ -379,6 +388,8 @@ fn cli_writes_actions_through_fake_mod() {
     for (arguments, action_name) in [
         (vec!["ping"], "ping"),
         (vec!["move", "right", "--ticks", "10"], "move_relative"),
+        (vec!["say", "hello from the CLI"], "say"),
+        (vec!["bubble", "hello above the Companion"], "bubble"),
     ] {
         let bridge = temp_bridge();
         bridge.ensure_layout().unwrap();

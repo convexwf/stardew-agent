@@ -168,6 +168,25 @@ enum Command {
         #[arg(long, default_value_t = 5_000)]
         timeout_ms: u64,
     },
+    /// Show a message from the Companion in the game's chat window.
+    #[command(alias = "chat")]
+    Say {
+        text: String,
+        #[arg(long, default_value = "companion-1")]
+        actor_id: String,
+        #[arg(long, default_value_t = 5_000)]
+        timeout_ms: u64,
+    },
+    /// Show a temporary speech bubble above the Companion.
+    Bubble {
+        text: String,
+        #[arg(long, default_value = "companion-1")]
+        actor_id: String,
+        #[arg(long, default_value_t = 3_000, value_parser = clap::value_parser!(u64).range(250..=30_000))]
+        duration_ms: u64,
+        #[arg(long, default_value_t = 5_000)]
+        timeout_ms: u64,
+    },
     /// Cancel the currently running Companion movement.
     Cancel {
         target_request_id: String,
@@ -380,6 +399,29 @@ fn run() -> Result<()> {
             ActionRequestPayload::EatItem {
                 actor_id: COMPANION_ID.to_owned(),
                 slot,
+            },
+            timeout_ms,
+        ),
+        Command::Say {
+            text,
+            actor_id,
+            timeout_ms,
+        } => send_and_print(
+            &bridge,
+            ActionRequestPayload::Say { actor_id, text },
+            timeout_ms,
+        ),
+        Command::Bubble {
+            text,
+            actor_id,
+            duration_ms,
+            timeout_ms,
+        } => send_and_print(
+            &bridge,
+            ActionRequestPayload::Bubble {
+                actor_id,
+                text,
+                duration_ms,
             },
             timeout_ms,
         ),

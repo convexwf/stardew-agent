@@ -200,6 +200,12 @@ internal sealed class ModEntry : Mod
                 case "eat_item":
                     ExecuteEatItem(request, processingPath);
                     break;
+                case "say":
+                    ExecuteSay(request, processingPath);
+                    break;
+                case "bubble":
+                    ExecuteBubble(request, processingPath);
+                    break;
                 case "cancel":
                     ExecuteCancel(request, processingPath);
                     break;
@@ -438,6 +444,110 @@ internal sealed class ModEntry : Mod
         ErrorDetail? error = null;
         var success = _companion is not null && _companion.TryEatItem(payload.Slot, out data, out error);
         WriteActionResult(request.RequestId!, "eat_item", actorId, success, data, error);
+        Archive(processingPath);
+    }
+
+    private void ExecuteSay(Envelope<JsonElement> request, string processingPath)
+    {
+        var payload = Deserialize<SayPayload>(request);
+        if (!TryValidateActor(request, "say", out var actorId))
+        {
+            Archive(processingPath);
+            return;
+        }
+
+        var text = payload.Text.Trim();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            WriteActionResult(request.RequestId!, "say", actorId, false, null, new ErrorDetail
+            {
+                Code = "invalid_text",
+                Message = "text must not be empty"
+            });
+            Archive(processingPath);
+            return;
+        }
+
+        if (text.Length > 500)
+        {
+            WriteActionResult(request.RequestId!, "say", actorId, false, null, new ErrorDetail
+            {
+                Code = "text_too_long",
+                Message = "text must be at most 500 characters"
+            });
+            Archive(processingPath);
+            return;
+        }
+
+        if (!Context.IsWorldReady || Game1.chatBox is null)
+        {
+            WriteActionResult(request.RequestId!, "say", actorId, false, null, new ErrorDetail
+            {
+                Code = "world_not_ready",
+                Message = "the game chat window is not ready"
+            });
+            Archive(processingPath);
+            return;
+        }
+
+        Game1.chatBox.addMessage(text, Microsoft.Xna.Framework.Color.Gold);
+        WriteActionResult(request.RequestId!, "say", actorId, true, new
+        {
+            text,
+            channel = "chat"
+        }, null);
+        Archive(processingPath);
+    }
+
+    private void ExecuteBubble(Envelope<JsonElement> request, string processingPath)
+    {
+        var payload = Deserialize<BubblePayload>(request);
+        if (!TryValidateActor(request, "bubble", out var actorId))
+        {
+            Archive(processingPath);
+            return;
+        }
+
+        var text = payload.Text.Trim();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            WriteActionResult(request.RequestId!, "bubble", actorId, false, null, new ErrorDetail
+            {
+                Code = "invalid_text",
+                Message = "text must not be empty"
+            });
+            Archive(processingPath);
+            return;
+        }
+
+        if (text.Length > 500)
+        {
+            WriteActionResult(request.RequestId!, "bubble", actorId, false, null, new ErrorDetail
+            {
+                Code = "text_too_long",
+                Message = "text must be at most 500 characters"
+            });
+            Archive(processingPath);
+            return;
+        }
+
+        if (payload.DurationMs is < 250 or > 30_000)
+        {
+            WriteActionResult(request.RequestId!, "bubble", actorId, false, null, new ErrorDetail
+            {
+                Code = "invalid_duration",
+                Message = "duration_ms must be between 250 and 30000"
+            });
+            Archive(processingPath);
+            return;
+        }
+
+        ErrorDetail? error = null;
+        var success = _companion is not null
+            && _companion.TryShowBubble(text, (int)payload.DurationMs, out error);
+        WriteActionResult(request.RequestId!, "bubble", actorId, success, success
+            ? new { text, channel = "bubble", duration_ms = payload.DurationMs }
+            : null, error);
         Archive(processingPath);
     }
 

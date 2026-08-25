@@ -54,7 +54,7 @@ Companion 由两个对象组成：
 当前 Demo 已实现三类能力：
 
 1. **状态读取**：读取最新完整快照、世界、主农场主、Companion、环形历史快照，并请求即时观察和背包；
-2. **Companion 直控**：移动、转向、使用工具、交互、显式传送、攻击、钓鱼、自动战斗开关、吃物品和取消移动；
+2. **Companion 直控**：移动、转向、使用工具、交互、显式传送、攻击、钓鱼、自动战斗开关、吃物品、发送聊天消息、显示头顶气泡和取消移动；
 3. **链路诊断**：查看请求/结果、检查 Bridge 目录、清理历史请求文件和持续观察状态变化。
 
 动作集合如下：
@@ -69,6 +69,8 @@ Companion 由两个对象组成：
 | 战斗 | `attack`、`set_auto_combat` | 是；攻击一次或开启/关闭实时自动攻击 |
 | 钓鱼 | `cast_fishing_rod` | 是；启动鱼竿状态机 |
 | 物品 | `get_inventory`、`eat_item` | 背包读取；吃物品会改变体力、生命和堆叠数量 |
+| 说话 | `say` | 是；在游戏聊天框中显示 Companion 消息 |
+| 气泡 | `bubble` | 是；在 Companion 头顶显示限定时长的文字气泡 |
 | 观察 | `observe` | 否；读取 Companion 周围 tile、对象、NPC 和怪物 |
 
 `use_tool`、`attack` 和 `cast_fishing_rod` 的命令入口已经实现，但实际是否成功取决于 Companion shadow farmer 当前是否拥有相应工具、目标是否存在以及游戏运行时前置条件。失败会通过结构化 `error` 返回，不会伪造成功。
@@ -271,6 +273,8 @@ snapshot-0.json → snapshot-1.json → snapshot-2.json
 | `cast_fishing_rod` | 无 |
 | `set_auto_combat` | `enabled` |
 | `eat_item` | 可选 `slot` |
+| `say` | `text` |
+| `bubble` | `text`、`duration_ms` |
 | `cancel` | `target_request_id` |
 
 示例：
@@ -427,9 +431,13 @@ stardew-cli --bridge-dir <bridge-directory> <command>
 | `cast-fishing-rod` | `cast_fishing_rod` | `cast-fishing-rod` |
 | `set-auto-combat --enabled <bool>` | `set_auto_combat` | `set-auto-combat --enabled true` |
 | `eat-item [--slot <n>]` | `eat_item` | `eat-item --slot 4` |
+| `say <text>`（别名 `chat`） | `say` | `say "我已经开始工作了"` |
+| `bubble <text> [--duration-ms <ms>]` | `bubble` | `bubble "我在这里" --duration-ms 3000` |
 | `cancel <request-id>` | `cancel` | `cancel 0c6c7d24-...` |
 
 写命令当前固定控制 `companion-1`；读命令可以通过 `--actor-id` 指定协议中的 actor 字段，但 Mod Demo 目前只接受这个唯一 ID。
+
+`say` 当前使用 Stardew Valley 的聊天框 API，显示一条带有 Companion 颜色的聊天消息。`bubble` 使用 Companion NPC 的世界绘制层，在角色头顶显示带文字换行和尾部指示的临时气泡；它不会打开 NPC DialogueBox，也不产生语音输出。
 
 `move_relative` 的 `ticks` 由 CLI 限制为 `1..=30`。`observe` 的 `radius` 由 CLI 和 Mod 共同限制为 `1..=16`。限制是为了避免单个请求无限占用游戏 tick 或产生过大的观察结果。
 
@@ -623,6 +631,7 @@ Mod 项目目标框架为 `net6.0`。Mac 可以安装 .NET SDK 编译 C# 工程�
 - 没有自主跟随、农场、采矿或钓鱼调度器；
 - `warp` 可以把 Companion 显式移动到另一个已加载地点，但没有跨地图自主寻路；
 - Companion 是否拥有鱼竿、武器以及动作是否可执行，取决于 shadow farmer 的实际背包和游戏前置条件；
+- `say` 只写入游戏聊天框；`bubble` 只显示临时头顶气泡，不会打开 NPC DialogueBox；
 - 状态是有限投影，不是完整存档或完整游戏对象图；
 - 当前 Bridge 适用于同一台机器上的低频 CLI/Mod 通信，不承诺跨机器、多 CLI 并发写入或高频实时控制；
 - Fake Mod 只覆盖协议和文件链路，不能替代 Windows 游戏验证；
@@ -638,6 +647,8 @@ Mod 项目目标框架为 `net6.0`。Mac 可以安装 .NET SDK 编译 C# 工程�
 - [x] `latest` 始终保存完整最新状态；
 - [x] 历史快照按固定槽位环形覆盖，数量由配置控制；
 - [x] CLI 支持状态、观察、背包、快照、请求、结果和 Bridge 诊断；
+- [x] CLI 支持向游戏聊天框发送 Companion 消息；
+- [x] CLI 支持在 Companion 头顶显示限定时长的文字气泡；
 - [x] CLI 支持参考项目 Player mode 的核心直控动作；
 - [x] Fake Mod 在 Mac 上覆盖全部协议动作入口；
 - [x] Rust 集成测试覆盖 ping、移动、快照轮转和动作协议；

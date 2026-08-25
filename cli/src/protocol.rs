@@ -71,6 +71,15 @@ pub enum ActionRequestPayload {
         actor_id: String,
         slot: Option<usize>,
     },
+    Say {
+        actor_id: String,
+        text: String,
+    },
+    Bubble {
+        actor_id: String,
+        text: String,
+        duration_ms: u64,
+    },
     Cancel {
         actor_id: String,
         target_request_id: String,

@@ -146,6 +146,27 @@ internal sealed class EatItemPayload
     public int? Slot { get; set; }
 }
 
+internal sealed class SayPayload
+{
+    [JsonPropertyName("actor_id")]
+    public string ActorId { get; set; } = "companion-1";
+
+    [JsonPropertyName("text")]
+    public string Text { get; set; } = "";
+}
+
+internal sealed class BubblePayload
+{
+    [JsonPropertyName("actor_id")]
+    public string ActorId { get; set; } = "companion-1";
+
+    [JsonPropertyName("text")]
+    public string Text { get; set; } = "";
+
+    [JsonPropertyName("duration_ms")]
+    public long DurationMs { get; set; } = 3000;
+}
+
 internal sealed class CancelPayload
 {
     [JsonPropertyName("actor_id")]

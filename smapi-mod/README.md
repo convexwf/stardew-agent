@@ -14,7 +14,7 @@ move_relative       move_to             cancel
 face_direction      use_tool            interact
 warp_to             observe              get_inventory
 attack              cast_fishing_rod    set_auto_combat
-eat_item
+eat_item             say                 bubble
 ```
 
 CLI 与协议字段、结果示例和完整链路见 [`doc/demo/cli-file-bridge.md`](../doc/demo/cli-file-bridge.md)。Mod 只接受 `actor_id=companion-1`；主农场主只进入状态快照，不是这些动作的目标。
