@@ -53,7 +53,7 @@ Companion 由两个对象组成：
 
 Companion 的逻辑名称固定为 `companion-1`，这个名称同时用于 CLI 的 `actor_id`、状态扫描和动作路由，不能为了修复游戏资源加载而改成原版 NPC 名称。
 
-当前 Demo 尚未提供自定义头像资源。由于 Stardew Valley 会根据 NPC 名称尝试加载 `Portraits/companion-1`，Mod 在 SMAPI 的 `AssetRequested` 事件中临时将该资源映射到游戏已有的 `Portraits/Abigail`。这是为了先验证 Companion 的生成和通信链路，不表示 Companion 的最终人物形象，也不改变其逻辑身份。
+当前 Demo 尚未提供自定义头像资源。由于 Stardew Valley 会根据 NPC 名称尝试加载 `Portraits/companion-1`，Mod 在 SMAPI 的 `AssetRequested` 事件中临时将该资源映射到游戏已有的 `Portraits/Abigail`，并向 `Data/Characters` 注入最小的 Companion 角色数据，确保游戏将其作为有效 NPC 处理。这是为了先验证 Companion 的生成和通信链路，不表示 Companion 的最终人物形象，也不改变其逻辑身份。
 
 后续设计自己的头像时，只需将该映射的返回资源替换为 Mod 自带的 portrait 文件，并保留 `Portraits/companion-1` 这个资源键；如果替换行走动画，也应以同样方式注册 `Characters/companion-1`，不改动 CLI 和 Bridge 协议。
 
@@ -464,7 +464,7 @@ Mod 订阅以下事件：
 | `DayStarted` | 重置 shadow farmer 的睡眠状态和基础资源 |
 | `DayEnding` | 向 shadow farmer 发出睡眠就绪信号 |
 | `ReturnedToTitle` | 取消正在执行的移动并清理可见 Companion |
-| `AssetRequested` | 将当前 Demo 的 `Portraits/companion-1` 临时映射到 `Portraits/Abigail` |
+| `AssetRequested` | 注入 Companion 角色数据，并将当前 Demo 的 `Portraits/companion-1` 临时映射到 `Portraits/Abigail` |
 
 ### 请求处理
 

@@ -4,7 +4,7 @@
 
 Companion 由可见 NPC 和隐藏 shadow farmer 组成：NPC 负责画面中的位置和寻路，shadow farmer 持有物品并调用 Farmer、Tool、Item 等游戏机制。它不是原版联机 Farmhand，不需要启动第二个游戏客户端。
 
-当前 Demo 保留逻辑名称 `companion-1`，并通过 SMAPI `AssetRequested` 将 `Portraits/companion-1` 临时映射到游戏已有的 Abigail 头像。该头像只是通信和生成验证阶段的占位资源，后续可以替换为 Mod 自带的自定义 portrait，不改变 CLI、状态扫描或动作路由。
+当前 Demo 保留逻辑名称 `companion-1`，并通过 SMAPI `AssetRequested` 注入最小角色数据，同时将 `Portraits/companion-1` 临时映射到游戏已有的 Abigail 头像。该头像只是通信和生成验证阶段的占位资源，后续可以替换为 Mod 自带的自定义 portrait，不改变 CLI、状态扫描或动作路由。
 
 ## 支持的动作
 

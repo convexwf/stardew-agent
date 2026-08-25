@@ -75,7 +75,11 @@ internal sealed class CompanionController
             _shadow.Items.Add(null);
 
         SyncShadow();
-        _monitor.Log($"Spawned {DisplayName} in {location.Name}.", LogLevel.Info);
+        _monitor.Log(
+            $"Spawned {DisplayName} in {location.Name} at pixel ({position.X:0},{position.Y:0}), "
+            + $"tile ({_visual.Tile.X:0.0},{_visual.Tile.Y:0.0}), visible={!_visual.IsInvisible}, "
+            + $"sprite_loaded={_visual.Sprite?.Texture is not null}.",
+            LogLevel.Info);
     }
 
     public MoveCompletion? Tick()

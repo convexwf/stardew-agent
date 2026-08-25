@@ -3,6 +3,7 @@ using Microsoft.Xna.Framework.Graphics;
 using StardewModdingAPI;
 using StardewModdingAPI.Events;
 using StardewValley;
+using StardewValley.GameData.Characters;
 
 namespace StardewAgentMod;
 
@@ -63,12 +64,29 @@ internal sealed class ModEntry : Mod
 
     private void OnAssetRequested(object? sender, AssetRequestedEventArgs e)
     {
-        if (!e.NameWithoutLocale.IsEquivalentTo($"Portraits/{CompanionController.Id}"))
+        if (e.NameWithoutLocale.IsEquivalentTo($"Portraits/{CompanionController.Id}"))
+        {
+            e.LoadFrom(
+                () => Helper.GameContent.Load<Texture2D>("Portraits/Abigail"),
+                AssetLoadPriority.Exclusive);
+            return;
+        }
+
+        if (!e.NameWithoutLocale.IsEquivalentTo("Data/Characters"))
             return;
 
-        e.LoadFrom(
-            () => Helper.GameContent.Load<Texture2D>("Portraits/Abigail"),
-            AssetLoadPriority.Exclusive);
+        e.Edit(asset =>
+        {
+            var data = asset.AsDictionary<string, CharacterData>();
+            if (data.Data.ContainsKey(CompanionController.Id))
+                return;
+
+            data.Data[CompanionController.Id] = new CharacterData
+            {
+                DisplayName = CompanionController.DisplayName,
+                HomeRegion = "Town"
+            };
+        });
     }
 
     private void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)
