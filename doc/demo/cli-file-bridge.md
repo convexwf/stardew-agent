@@ -5,9 +5,9 @@
 | 项目 | 内容 |
 | --- | --- |
 | **文档标题** | CLI 工具系统通信 Demo 技术实现方案 |
-| **文档版本** | v0.11 |
+| **文档版本** | v0.12 |
 | **创建日期** | 2026-08-23 |
-| **更新日期** | 2026-08-25 |
+| **更新日期** | 2026-08-26 |
 | **文档类型** | 技术实现方案 |
 | **参考资料** | [SMAPI Mod 结构](https://wiki.stardewvalley.net/Modding:Modder_Guide/APIs/Mod_structure)、[SMAPI Mod package](https://github.com/Pathoschild/SMAPI/blob/develop/docs/technical/mod-package.md)、[StardewMCP](https://github.com/Hunter-Thompson/stardew-mcp/tree/3ca54bbfc1d446eeb06d822a74c92cd14df82b93)、[StardewValley-MCP](https://github.com/amarisaster/StardewValley-MCP) |
 
@@ -16,6 +16,7 @@
 - [文档定位](#文档定位)
 - [当前实现范围](#当前实现范围)
 - [数据交互链路](#数据交互链路)
+- [动作生命周期与取消](#动作生命周期与取消)
 - [组件与目录](#组件与目录)
 - [Bridge 目录与文件语义](#bridge-目录与文件语义)
 - [协议定义](#协议定义)
@@ -62,7 +63,7 @@ Companion 的逻辑名称固定为 `companion-1`，这个名称同时用于 CLI 
 当前 Demo 已实现三类能力：
 
 1. **状态读取**：读取最新完整快照、世界、主农场主、Companion、环形历史快照，并请求即时观察和背包；
-2. **Companion 直控**：移动、转向、使用工具、交互、显式传送、攻击、钓鱼、自动战斗开关、吃物品、发送聊天消息、显示头顶气泡和取消移动；
+2. **Companion 直控**：移动、转向、使用工具、交互、显式传送、攻击、钓鱼、自动战斗开关、吃物品、发送聊天消息、显示头顶气泡和取消动作；统一取消机制仍待实现；
 3. **链路诊断**：查看请求/结果、检查 Bridge 目录、清理历史请求文件和持续观察状态变化。
 
 动作集合如下：
@@ -70,16 +71,17 @@ Companion 的逻辑名称固定为 `companion-1`，这个名称同时用于 CLI 
 | 类别 | 动作 | 是否改变游戏状态 |
 | --- | --- | --- |
 | 连通性 | `ping` | 否；验证 CLI → Mod → CLI |
-| 移动 | `move_relative`、`move_to`、`cancel` | 是；改变 Companion 的游戏内位置或移动任务 |
+| 移动 | `move_relative`、`move_to` | 是；改变 Companion 的游戏内位置或移动任务；移动过程必须可取消 |
 | 姿态 | `face_direction` | 是；改变 Companion 朝向 |
 | 工具与交互 | `use_tool`、`interact` | 是；由游戏 API 决定是否成功 |
 | 地图 | `warp_to` | 是；显式把 Companion 移到指定地点和 tile |
 | 战斗 | `attack`、`set_auto_combat` | 是；攻击一次或开启/关闭实时自动攻击 |
 | 钓鱼 | `cast_fishing_rod` | 是；启动鱼竿状态机 |
 | 物品 | `get_inventory`、`eat_item` | 背包读取；吃物品会改变体力、生命和堆叠数量 |
-| 说话 | `say` | 是；在游戏聊天框中显示 Companion 消息 |
-| 气泡 | `bubble` | 是；在 Companion 头顶显示限定时长的文字气泡 |
+| 说话 | `say` | 是；在游戏聊天框中显示 Companion 消息；消息提交前可取消 |
+| 气泡 | `bubble` | 是；在 Companion 头顶显示限定时长的文字气泡，显示期间可取消 |
 | 观察 | `observe` | 否；读取 Companion 周围 tile、对象、NPC 和怪物 |
+| 控制 | `cancel` | 取消任意尚未完成的 action；不回滚已经完成的游戏副作用 |
 
 `use_tool`、`attack` 和 `cast_fishing_rod` 的命令入口已经实现，但实际是否成功取决于 Companion shadow farmer 当前是否拥有相应工具、目标是否存在以及游戏运行时前置条件。失败会通过结构化 `error` 返回，不会伪造成功。
 
@@ -141,6 +143,66 @@ flowchart LR
 6. CLI 读取结果。之后的 `snapshot-latest.json` 会在下一次状态写出时反映 Companion 的当前位置。
 
 因此，写入 JSON 请求本身不等于修改游戏。只有 Mod 领取请求、调用游戏 API 并生成成功结果后，才算动作执行完成。
+
+## 动作生命周期与取消
+
+所有 `action.request` 都必须携带 `request_id`，并通过同一个 `cancel` 动作支持取消。取消是一个独立的控制请求，不在原动作 payload 中增加布尔字段；这样 CLI、脚本和其他外部调用方都可以在拿到目标 request ID 后，从另一个进程发出取消请求。
+
+“支持取消”表示 Mod 在动作尚未完成时能够阻止它继续执行，并为目标请求写出 `cancelled` 终态；它不表示能够撤销已经完成的游戏副作用。例如，已经显示到聊天框的 `say` 消息不能被删除，已经完成的 `eat_item` 不能通过取消恢复物品。对一次性动作，取消窗口位于调用游戏 API 之前；对长动作，取消窗口覆盖整个状态机生命周期。
+
+动作处理必须遵守以下生命周期：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: CLI 写入 action.request
+    Pending --> Cancelled: cancel 在领取前到达
+    Pending --> Running: Mod 领取请求
+    Running --> CancelRequested: cancel 被接受
+    CancelRequested --> Cancelled: 动作在安全点停止
+    Running --> Succeeded: 动作完成
+    Running --> Failed: 前置条件/游戏 API 失败
+    Running --> Blocked: 移动无法到达目标
+    Succeeded --> [*]
+    Failed --> [*]
+    Blocked --> [*]
+    Cancelled --> [*]
+```
+
+Mod 不使用阻塞等待、线程强杀或 `Thread.Sleep` 实现取消。`UpdateTicked` 每次先处理取消控制请求，再推进当前任务；长动作在每个游戏 Tick 的安全点检查取消标记。取消只能在主线程中调用游戏 API，从而避免跨线程访问 Stardew Valley 对象。
+
+取消请求的处理结果与目标动作结果分开：
+
+1. `cancel` 自身返回“取消请求已接受、目标已完成或目标不存在”等处理结果；
+2. 目标请求仍然使用原来的 `request_id` 写出最终 `action.result`；
+3. 目标进入 `cancelled` 前，CLI 不能仅凭 `cancel` 的返回就断言动作已经停止，应继续读取目标结果或使用 `result show` 查询；
+4. 如果目标已经完成，取消不会回滚副作用，`cancel` 返回目标已完成；如果目标仍在 `pending`，Mod 直接写入目标的 `cancelled` 结果并归档请求；如果目标在执行中，Mod 设置取消标记并由对应动作的 Tick 逻辑完成清理。
+
+取消请求在 Mod 的读取链路中具有优先级：每个 `UpdateTicked` 先扫描并领取 `cancel`，再推进活动任务，最后领取普通动作。普通动作不会自动取消当前任务；当单个 `companion-1` 已经执行一个长动作时，新的普通动作仍返回 `busy`，只有明确的 `cancel` 才能中断它。
+
+### 各类动作的取消边界
+
+| 动作类别 | 执行方式 | 取消检查点 | 已完成后的行为 |
+| --- | --- | --- | --- |
+| `move_relative`、`move_to` | 路径控制器逐 Tick 移动 | 每个 Tick；调用路径控制器停止并记录当前位置 | 不回退已经走过的路径，目标结果为 `cancelled` |
+| `cast_fishing_rod` | 鱼竿状态机逐 Tick 更新 | 抛竿、等待咬钩、收线的每个安全点；清理鱼竿状态 | 已经完成的捕获不回滚 |
+| `set_auto_combat` | 自动战斗循环逐 Tick 检查 | 每次自动攻击前；关闭自动战斗并结束任务 | 已造成的伤害不回滚；使用中的模式被关闭 |
+| `bubble` | 带截止时间的显示状态 | 每个 Tick；清除当前气泡 | 已消失的气泡不产生额外效果 |
+| `face_direction`、`use_tool`、`interact`、`warp_to`、`attack`、`eat_item`、`say` | 单 Tick 内调用一次游戏 API | 调用 API 前 | 已提交的游戏副作用不回滚 |
+| `ping`、`observe`、`get_inventory` | 单 Tick 内读取状态 | 读取开始前 | 已返回的只读结果无需撤销 |
+
+一次性动作也必须经过统一任务登记和取消检查，不能因为通常很快就省略 `request_id` 或取消分支。取消请求到达时，如果游戏 API 调用已经完成，系统返回目标已完成，而不是伪造一个取消结果。
+
+### CLI 等待与取消
+
+同步 CLI 等待结果时，CLI 进程本身会阻塞等待，但不会阻塞游戏主线程。为了让长距离 `move_to` 可以在等待期间被中断，CLI 需要提供分离生命周期：先提交并立即打印 `request_id`，再由另一个命令等待结果或发送 `cancel <request-id>`。推荐的接口形状是：
+
+```text
+stardew-cli move-to --x 120 --y 80 --detach
+stardew-cli wait <request-id>
+stardew-cli cancel <request-id>
+```
+
+`--detach` 只改变 CLI 的等待行为，不改变 Bridge 协议；请求仍然由 Mod 按相同的 `pending` → `processing` → `results` / `archive` 链路执行。CLI 超时也不等于取消，调用方必须显式发出 `cancel`。
 
 `action.result` 与 `snapshot` 的职责不同：
 
@@ -312,7 +374,7 @@ snapshot-0.json → snapshot-1.json → snapshot-2.json
 | --- | --- |
 | `succeeded` | Mod 执行动作并满足成功条件 |
 | `blocked` | 移动任务结束但未到达目标 |
-| `cancelled` | 移动任务被取消 |
+| `cancelled` | 目标动作在完成前被取消 |
 | `failed` | 参数、世界状态或游戏 API 前置条件不满足 |
 | `expired` | 预留给上层调用方标记等待超时；当前 CLI 超时不会写入这个状态，也不会自动撤销已发出的请求 |
 
@@ -343,6 +405,8 @@ snapshot-0.json → snapshot-1.json → snapshot-2.json
 ```
 
 移动结果还包括 `before_tile`、`after_tile`、`target_tile`、`moved` 和 `world_ready`。观察结果的 `data.observation` 包含地点、中心 tile、半径、特殊 tile、怪物和 NPC；背包结果的 `data.inventory` 为结构化物品数组。
+
+取消结果至少包含 `target_request_id`、`target_action`、`target_status` 和 `cancelled`。`cancelled=true` 表示目标已经进入取消流程或已经写出取消终态；调用方仍应读取目标 request 的结果，以确认动作是否已经完成清理。目标动作的取消结果保留原动作字段，例如移动仍需返回取消发生时的 `before_tile`、`after_tile` 和 `target_tile`。
 
 ### Snapshot
 
@@ -443,13 +507,23 @@ stardew-cli [--bridge-dir <bridge-directory>] <command>
 | `eat-item [--slot <n>]` | `eat_item` | `eat-item --slot 4` |
 | `say <text>`（别名 `chat`） | `say` | `say "我已经开始工作了"` |
 | `bubble <text> [--duration-ms <ms>]` | `bubble` | `bubble "我在这里" --duration-ms 3000` |
-| `cancel <request-id>` | `cancel` | `cancel 0c6c7d24-...` |
+| `cancel <request-id>` | `cancel`；可指向任意尚未完成的 action | `cancel 0c6c7d24-...` |
 
 写命令当前固定控制 `companion-1`；读命令可以通过 `--actor-id` 指定协议中的 actor 字段，但 Mod Demo 目前只接受这个唯一 ID。
 
 `say` 当前使用 Stardew Valley 的聊天框 API，显示一条带有 Companion 颜色的聊天消息。`bubble` 使用 Companion NPC 的世界绘制层，在角色头顶显示带文字换行和尾部指示的临时气泡；它不会打开 NPC DialogueBox，也不产生语音输出。
 
 `move_relative` 的 `ticks` 由 CLI 限制为 `1..=30`。`observe` 的 `radius` 由 CLI 和 Mod 共同限制为 `1..=16`。限制是为了避免单个请求无限占用游戏 tick 或产生过大的观察结果。
+
+为支持长距离 `move_to` 的中断，CLI 实现需要增加分离等待方式。同步模式保持现有命令形状；分离模式只提交请求并立即输出 request ID，`wait` 负责后续等待，`cancel` 负责从另一个 CLI 进程发送取消请求。以下接口属于本方案的待实现部分：
+
+```text
+stardew-cli move-to --x 120 --y 80 --detach
+stardew-cli wait <request-id>
+stardew-cli cancel <request-id>
+```
+
+所有动作命令都使用相同的 `request_id`、`wait` 和 `cancel` 机制，而不是为 `move_to` 单独设计一套取消协议。同步 CLI 的超时只停止等待，不会隐式取消动作。
 
 ## SMAPI Mod 行为
 
@@ -459,25 +533,27 @@ Mod 订阅以下事件：
 
 | 事件 | 行为 |
 | --- | --- |
-| `UpdateTicked` | 确保 Companion 存在、进入存档后首次写出 latest、推进移动/钓鱼/自动战斗、领取 pending 请求 |
+| `UpdateTicked` | 确保 Companion 存在、进入存档后首次写出 latest、优先领取取消请求、推进活动动作、领取普通 pending 请求 |
 | `OneSecondUpdateTicked` | 按配置写 latest 和历史快照 |
 | `DayStarted` | 重置 shadow farmer 的睡眠状态和基础资源 |
 | `DayEnding` | 向 shadow farmer 发出睡眠就绪信号 |
-| `ReturnedToTitle` | 取消正在执行的移动并清理可见 Companion |
+| `ReturnedToTitle` | 取消所有正在执行的动作并清理可见 Companion |
 | `AssetRequested` | 注入 Companion 角色数据，并将当前 Demo 的 `Portraits/companion-1` 临时映射到 `Portraits/Abigail` |
 
 ### 请求处理
 
-请求处理顺序是：扫描 `pending` → 原子移动到 `processing` → 读取 Envelope → 读取 `payload.action` → 校验 actor 和参数 → 调用 CompanionController → 写结果 → 归档请求。
+请求处理顺序是：优先扫描并领取 `cancel` → 推进已有活动动作 → 扫描普通 `pending` → 原子移动到 `processing` → 读取 Envelope → 读取 `payload.action` → 校验 actor 和参数 → 调用 CompanionController 或创建动作状态机 → 写结果 → 归档请求。
 
-移动请求是异步动作：
+`cancel` 是所有 action 共用的取消入口。Mod 为每个已领取的请求保留最小运行状态，并在每个 `UpdateTicked` 执行取消检查：
 
-- `move_relative` 根据方向和 ticks 计算相对目标 tile；
-- `move_to` 直接交给游戏路径控制器；
-- 每个游戏 tick 检查是否到达、路径是否结束或是否超时；
-- `cancel` 只取消当前正在执行的移动请求，并为原请求写入 `cancelled` 结果。
+- `move_relative` 和 `move_to` 由路径控制器逐 Tick 推进，收到取消后停止控制器，保留当前位置并为原请求写入 `cancelled`；
+- `cast_fishing_rod` 保存鱼竿状态机对应的 request ID，收到取消后退出钓鱼状态并清理相关状态；
+- `set_auto_combat` 的启用状态绑定到活动任务，收到取消后关闭自动战斗循环；
+- `bubble` 在显示期间保留 request ID，收到取消后清除气泡；
+- 一次性动作在调用游戏 API 前检查取消；如果 API 已返回，则动作视为已完成，取消只能返回目标已完成，不能回滚游戏副作用；
+- 只读动作同样登记 request ID，读取开始前可以取消，读取完成后取消不再产生效果。
 
-其他动作在当前请求处理 tick 内调用游戏 API，并写入 `succeeded` 或 `failed` 结果。
+`UpdateTicked` 不等待长动作结束。它每次只执行有限的状态推进和取消检查，保证 Mod 可以继续读取新的 cancel 请求。动作处理器不得在游戏主线程中运行阻塞循环、等待文件结果或休眠。
 
 ### 状态读取
 
@@ -531,9 +607,13 @@ Fake Mod 不能验证 SMAPI API、游戏碰撞、实际寻路、工具动画、�
 | `unsupported_action` | Mod 没有对应分发分支 | 结果写为失败，请求归档 |
 | `unsupported_actor` | actor 不是 `companion-1` | 结果写为失败，请求归档 |
 | `world_not_ready` | 未进入存档或 Companion 未创建 | 结果写为失败 |
-| `busy` | Companion 仍有移动任务 | 新动作失败 |
+| `busy` | Companion 仍有活动任务 | 新的普通动作失败；取消请求仍然优先处理 |
 | `blocked` | 路径结束但没有抵达目标 | 移动结果带前后 tile |
 | `movement_timeout` | 移动超出 tick 限制 | 结果失败/阻塞并释放任务 |
+| `cancelled_before_start` | 目标仍在 `pending`，尚未调用游戏 API | 目标结果为 `cancelled` 并归档 |
+| `cancelled_by_request` | 活动动作在安全点响应取消 | 目标结果为 `cancelled` 并完成动作清理 |
+| `request_not_found` | Bridge 中不存在目标 request | `cancel` 自身失败 |
+| `request_completed` | 目标已经写出终态结果 | `cancel` 自身返回未取消，不回滚副作用 |
 | `unknown_tool`、`no_attack_target` 等 | 游戏动作前置条件不满足 | 结构化动作失败 |
 
 ### CLI 超时
@@ -545,7 +625,7 @@ stardew-cli request show <request-id>
 stardew-cli result show <request-id>
 ```
 
-判断请求是仍在 `pending`、正在 `processing`、已归档还是进入 `errors`。对移动请求，如果它仍在游戏中执行，可以使用 `cancel <request-id>`。
+判断请求是仍在 `pending`、正在 `processing`、已归档还是进入 `errors`。对任何尚未进入终态的 action，都可以使用 `cancel <request-id>`；取消请求本身成功不代表目标结果已经写完，应继续查询目标 request 的结果。
 
 ### 崩溃恢复
 
@@ -646,6 +726,8 @@ Mod 项目目标框架为 `net6.0`。Mac 可以安装 .NET SDK 编译 C# 工程�
 - `warp` 可以把 Companion 显式移动到另一个已加载地点，但没有跨地图自主寻路；
 - Companion 是否拥有鱼竿、武器以及动作是否可执行，取决于 shadow farmer 的实际背包和游戏前置条件；
 - `say` 只写入游戏聊天框；`bubble` 只显示临时头顶气泡，不会打开 NPC DialogueBox；
+- 当前代码的 `cancel` 仍主要覆盖移动；统一覆盖钓鱼、自动战斗、气泡和一次性 action 的取消语义尚待实现；
+- 当前 CLI 仍以同步等待为主，分离提交、`wait` 和跨进程取消接口尚待实现；
 - 状态是有限投影，不是完整存档或完整游戏对象图；
 - 当前 Bridge 适用于同一台机器上的低频 CLI/Mod 通信，不承诺跨机器、多 CLI 并发写入或高频实时控制；
 - Fake Mod 只覆盖协议和文件链路，不能替代 Windows 游戏验证；
@@ -666,5 +748,11 @@ Mod 项目目标框架为 `net6.0`。Mac 可以安装 .NET SDK 编译 C# 工程�
 - [x] CLI 支持参考项目 Player mode 的核心直控动作；
 - [x] Fake Mod 在 Mac 上覆盖全部协议动作入口；
 - [x] Rust 集成测试覆盖 ping、移动、快照轮转和动作协议；
+- [x] `move_to` 使用逐 Tick 路径控制，不在游戏主线程同步等待；
+- [ ] 所有 action 登记统一任务状态，并在完成前支持 `cancel`；
+- [ ] `move_relative`、`move_to`、钓鱼、自动战斗和气泡的活动状态可被取消并完成清理；
+- [ ] 一次性和只读 action 具备统一的取消前检查及已完成结果语义；
+- [ ] CLI 支持分离提交、按 request ID 等待和跨进程取消；
+- [ ] Fake Mod 覆盖 pending、processing、运行中任务和已完成任务的取消竞态；
 - [ ] Windows + SMAPI 真实游戏中完成全部动作的阶段验证；
 - [ ] 在真实游戏中验证不同地点、工具、作物、箱子、怪物和鱼竿状态机的版本兼容性。
