@@ -5,7 +5,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | **文档标题** | CLI 工具系统通信 Demo 技术实现方案 |
-| **文档版本** | v0.14 |
+| **文档版本** | v0.15 |
 | **创建日期** | 2026-08-23 |
 | **更新日期** | 2026-08-26 |
 | **文档类型** | 技术实现方案 |
@@ -15,6 +15,7 @@
 
 - [文档定位](#文档定位)
 - [当前实现范围](#当前实现范围)
+- [Follow 方案（待实现）](#follow-方案待实现)
 - [数据交互链路](#数据交互链路)
 - [动作生命周期与取消](#动作生命周期与取消)
 - [组件与目录](#组件与目录)
@@ -84,6 +85,115 @@ Companion 的逻辑名称固定为 `companion-1`，这个名称同时用于 CLI 
 | 控制 | `cancel` | 取消任意尚未完成的 action；不回滚已经完成的游戏副作用 |
 
 `use_tool`、`attack` 和 `cast_fishing_rod` 的命令入口已经实现，但实际是否成功取决于 Companion shadow farmer 当前是否拥有相应工具、目标是否存在以及游戏运行时前置条件。失败会通过结构化 `error` 返回，不会伪造成功。
+
+## Follow 方案（待实现）
+
+Follow 是一个持续运行的异步动作，用于让 `companion-1` 跟随当前主农场主。它不由 CLI 通过反复读取快照、计算位置和提交 `move_to` 实现，而由 SMAPI Mod 在游戏主线程中维护一个 `FollowTask`。CLI 只负责启动和取消任务，游戏运行时负责读取玩家位置、寻路、跨地图同步和动作清理。
+
+### CLI 命令
+
+计划增加以下命令，默认跟随主农场主：
+
+```text
+stardew-cli follow [--distance <tiles>]
+```
+
+`--distance` 表示 Companion 与主农场主之间的期望最小距离，默认值为 `2`，由 CLI 和 Mod 限制在安全范围内。第一版不暴露重算路径周期、紧急 warp 距离等执行参数，这些参数属于 Mod 的行为策略，后续可通过 Mod 配置调整。
+
+该命令只返回受理回执，不等待跟随结束：
+
+```text
+stardew-cli follow --distance 2
+stardew-cli cancel <follow-request-id>
+stardew-cli wait <cancel-request-id>
+stardew-cli wait <follow-request-id>
+```
+
+Follow 是长期任务，因此它的原始结果在跟随期间保持为 `pending`。只有收到 `cancel`、世界不可用或任务发生不可恢复错误时，Mod 才会为原 request 写入终态结果。CLI 不应使用短超时把 `wait` 的超时解释成 follow 失败；需要结束跟随时必须显式调用 `cancel`。
+
+### 请求字段
+
+Follow 使用现有 `action.request` Envelope，计划增加以下 action payload：
+
+```json
+{
+  "action": "follow",
+  "actor_id": "companion-1",
+  "target_actor_id": "player",
+  "distance": 2
+}
+```
+
+`target_actor_id` 第一版固定支持 `player`，不表示创建第二个 Farmhand；它只是把主农场主作为游戏内目标。`follow` 与 `warp_to` 是不同语义：`warp_to` 是一次性把 Companion 移到调用方指定的地点，`follow` 则在 Mod 内持续观察目标并在需要时自动调整位置。
+
+### Mod 内部任务
+
+Mod 为每个活动 follow 保存一个最小状态对象：
+
+| 字段 | 作用 |
+| --- | --- |
+| `request_id` | 关联原始 action.result 和 cancel 请求 |
+| `actor_id` | 当前固定为 `companion-1` |
+| `target_actor_id` | 当前固定为 `player` |
+| `desired_distance` | 目标周围的保持距离 |
+| `last_target_location` | 上一次观察到的玩家地图 |
+| `last_target_tile` | 上一次触发重算的玩家 tile |
+| `repath_cooldown` | 限制 PathFindController 重建频率 |
+| `state` | `following`、`waiting`、`warping` 或 `blocked` |
+
+每个 `UpdateTicked` 的处理顺序保持为：先处理 cancel，再推进已有动作，最后领取普通 pending 请求。Follow 的 Tick 逻辑如下：
+
+```mermaid
+flowchart TD
+    A["follow request accepted"] --> B["Mod owns FollowTask"]
+    B --> C{"same location?"}
+    C -->|no| D["warp NPC and shadow farmer near player"]
+    D --> E["continue follow"]
+    C -->|yes| F{"outside desired distance?"}
+    F -->|no| G["clear controller and wait"]
+    F -->|yes| H{"repath cooldown elapsed?"}
+    H -->|yes| I["rebuild PathFindController"]
+    H -->|no| G
+    I --> E
+    B --> J{"cancel or world unavailable?"}
+    J -->|cancel| K["clear controller and write cancelled"]
+    J -->|world unavailable| L["finish with failed result"]
+```
+
+具体行为如下：
+
+1. **同地图且距离足够近**：清除过期的路径控制器，进入 `waiting`，不重复创建移动任务。
+2. **同地图但距离超过阈值**：在重算冷却结束后，以玩家附近的可通行 tile 为目标创建 `PathFindController`；玩家移动达到一定幅度或当前路径失效时才重算。
+3. **玩家切换地图**：清除旧地图中的 NPC 和旧路径，将可见 NPC 放入玩家当前 `GameLocation`，同时更新 shadow farmer 的 `currentLocation` 和像素位置，然后继续 follow。
+4. **距离异常过远或路径无法建立**：使用与参考项目相同的近距离应急 warp，把 Companion 放到玩家附近的可通行 tile，再继续跟随；如果找不到安全位置，则返回结构化失败结果。
+5. **取消或世界结束**：清除路径控制器和 follow 状态，为原 request 写入 `cancelled` 或对应失败结果。取消优先级高于普通动作领取。
+
+跨地图 follow 使用的是“玩家换地图后 Mod 自动 warp Companion”，不是让 Companion 自己寻找地图出口。由于 Companion 是 Mod 创建的 NPC + shadow farmer，这种 warp 不会启动第二个客户端，也不会把它注册成原版联机 Farmhand。它必须同时更新可见 NPC 和 shadow farmer，否则后续工具、战斗和交互会在错误的地图对象上执行。
+
+### 与其他动作的关系
+
+单个 `companion-1` 同时只允许一个活动任务。Follow 运行期间：
+
+- `cancel` 始终可以领取并优先执行；
+- 普通移动、显式 `warp`、钓鱼和其他需要占用 Companion 的 action 返回 `busy`；
+- 需要手动 `warp` 或执行其他长期动作时，先取消 follow，再提交新 action；
+- `set_auto_combat --enabled false` 可以继续作为关闭自动战斗的控制动作，但不会隐式结束 follow。
+
+Follow 的状态写入现有 Companion 快照字段：`busy=true`、`current_action=follow`，并增加可选的 follow 详情，包括目标 actor、目标地点、目标 tile、当前 follow 状态和最近一次自动 warp。这样外部 Agent 可以通过 `status` 观察 follow，而不需要依赖 `wait` 阻塞。
+
+### 错误与验证范围
+
+计划增加 `follow` 相关错误：
+
+| 错误 | 含义 |
+| --- | --- |
+| `invalid_distance` | 跟随距离不在允许范围内 |
+| `unsupported_follow_target` | 目标 actor 不是当前支持的 `player` |
+| `follow_target_unavailable` | 主农场主或当前世界暂时不可用 |
+| `follow_warp_failed` | 跨地图或应急 warp 找不到安全位置 |
+| `follow_path_blocked` | 同地图路径无法建立且应急 warp 也失败 |
+
+Fake Mod 可以先验证 follow 请求的字段、异步受理、pending 状态和 cancel 关联；真实的寻路、地图切换、NPC 所属地图同步和应急 warp 必须在 Windows + SMAPI 游戏中验证。
 
 ## 数据交互链路
 
@@ -339,7 +449,7 @@ snapshot-0.json → snapshot-1.json → snapshot-2.json
 
 ### Action Request
 
-`payload.action` 区分动作，`actor_id` 当前必须是 `companion-1`。请求字段如下：
+`payload.action` 区分动作，`actor_id` 当前必须是 `companion-1`。下表同时列出已实现动作和 Follow 方案字段；标注“方案”的动作尚未进入当前 CLI/Mod 实现。
 
 | `action` | 额外字段 |
 | --- | --- |
@@ -358,6 +468,7 @@ snapshot-0.json → snapshot-1.json → snapshot-2.json
 | `eat_item` | 可选 `slot` |
 | `say` | `text` |
 | `bubble` | `text`、`duration_ms` |
+| `follow`（方案） | `target_actor_id`、`distance` |
 | `cancel` | `target_request_id` |
 
 示例：
@@ -523,6 +634,14 @@ stardew-cli [--bridge-dir <bridge-directory>] <command>
 
 写命令当前固定控制 `companion-1`；读命令可以通过 `--actor-id` 指定协议中的 actor 字段，但 Mod Demo 目前只接受这个唯一 ID。
 
+Follow 方案命令（待实现）：
+
+| CLI 命令 | 请求动作 | 示例 |
+| --- | --- | --- |
+| `follow [--distance <tiles>]` | `follow` | `follow --distance 2` |
+
+Follow 默认把当前主农场主作为目标，命令成功后立即返回长期任务的 request ID。它不会在 CLI 中循环提交 `move_to`，跨地图自动 warp、同地图寻路和取消清理均由 Mod 完成。
+
 `say` 当前使用 Stardew Valley 的聊天框 API，显示一条带有 Companion 颜色的聊天消息。`bubble` 使用 Companion NPC 的世界绘制层，在角色头顶显示带文字换行和尾部指示的临时气泡；它不会打开 NPC DialogueBox，也不产生语音输出。
 
 `move_relative` 的 `ticks` 由 CLI 限制为 `1..=30`。`observe` 的 `radius` 由 CLI 和 Mod 共同限制为 `1..=16`。限制是为了避免单个请求无限占用游戏 tick 或产生过大的观察结果。
@@ -545,7 +664,7 @@ Mod 订阅以下事件：
 
 | 事件 | 行为 |
 | --- | --- |
-| `UpdateTicked` | 确保 Companion 存在、进入存档后首次写出 latest、优先领取取消请求、推进活动动作、领取普通 pending 请求 |
+| `UpdateTicked` | 确保 Companion 存在、进入存档后首次写出 latest、优先领取取消请求、推进活动动作（包括方案中的 follow）、领取普通 pending 请求 |
 | `OneSecondUpdateTicked` | 按配置写 latest 和历史快照 |
 | `DayStarted` | 重置 shadow farmer 的睡眠状态和基础资源 |
 | `DayEnding` | 向 shadow farmer 发出睡眠就绪信号 |
@@ -562,6 +681,7 @@ Mod 订阅以下事件：
 - `cast_fishing_rod` 保存鱼竿状态机对应的 request ID，收到取消后退出钓鱼状态并清理相关状态；
 - `set_auto_combat` 的启用状态绑定到活动任务，收到取消后关闭自动战斗循环；
 - `bubble` 在显示期间保留 request ID，收到取消后清除气泡；
+- `follow` 在每个 Tick 检查玩家位置，按地图和距离选择 warp、寻路或等待，收到取消后清除路径控制器并结束任务；
 - 一次性动作在调用游戏 API 前检查取消；如果 API 已返回，则动作视为已完成，取消只能返回目标已完成，不能回滚游戏副作用；
 - 只读动作同样登记 request ID，读取开始前可以取消，读取完成后取消不再产生效果。
 
@@ -624,6 +744,11 @@ Fake Mod 不能验证 SMAPI API、游戏碰撞、实际寻路、工具动画、�
 | `busy` | Companion 仍有活动任务 | 新的普通动作失败；取消请求仍然优先处理 |
 | `blocked` | 路径结束但没有抵达目标 | 移动结果带前后 tile |
 | `movement_timeout` | 移动超出 tick 限制 | 结果失败/阻塞并释放任务 |
+| `invalid_distance` | Follow 距离不在允许范围内 | Follow 请求失败 |
+| `unsupported_follow_target` | Follow 目标不是当前支持的 `player` | Follow 请求失败 |
+| `follow_target_unavailable` | Follow 运行时主农场主或世界不可用 | Follow 任务失败并清理状态 |
+| `follow_warp_failed` | Follow 找不到跨地图或应急 warp 的安全位置 | Follow 任务失败并清理状态 |
+| `follow_path_blocked` | Follow 无法建立路径且应急 warp 也失败 | Follow 任务失败并清理状态 |
 | `cancelled_before_start` | 目标仍在 `pending`，尚未调用游戏 API | 目标结果为 `cancelled` 并归档 |
 | `cancelled_by_request` | 活动动作在安全点响应取消 | 目标结果为 `cancelled` 并完成动作清理 |
 | `request_not_found` | Bridge 中不存在目标 request | `cancel` 自身失败 |
@@ -703,7 +828,8 @@ Mod 项目目标框架为 `net6.0`。Mac 可以安装 .NET SDK 编译 C# 工程�
 4. 如果 CLI 与 Mod 分开放置，在 Mod 配置中设置相同的 `BridgeDirectory`，或给 CLI 指定 `--bridge-dir`；
 5. 依次验证 `status`、`ping`、`observe`、`inventory`、`move-to`、`use-tool` 和 `interact`；
 6. 对传送、战斗、钓鱼和自动战斗分别在满足游戏前置条件的场景验证；
-7. 用 `snapshot list`、`doctor` 和 `request/result show` 检查文件轮转与请求生命周期。
+7. Follow 实现后，验证 `follow`、跨地图自动 warp、路径阻塞和 `cancel`；
+8. 用 `snapshot list`、`doctor` 和 `request/result show` 检查文件轮转与请求生命周期。
 
 可以在 Windows 真机验证后，把 Bridge 目录中的 JSON 复制到 Mac，用 CLI 做离线解析、查询和快照轮转测试；这些离线检查不能替代下一次真实游戏验证。
 
@@ -728,16 +854,16 @@ Mod 项目目标框架为 `net6.0`。Mac 可以安装 .NET SDK 编译 C# 工程�
 | `set_auto_combat` | `set-auto-combat` |
 | `eat_item` | `eat-item` |
 
-对应关系只表示动作语义，不表示两边协议字段、伴侣数量、资源配置或自主模式完全相同。当前 Demo 有意只创建一个 `companion-1`，只实现 direct 控制；没有实现参考项目的 follow、farm、mine、fish 等自主模式，也没有把 Companion 注册为原版联机 Farmhand。
+对应关系只表示动作语义，不表示两边协议字段、伴侣数量、资源配置或自主模式完全相同。当前 Demo 有意只创建一个 `companion-1`，已实现 direct 控制，Follow 仍处于方案阶段；没有实现参考项目的 farm、mine、fish 等自主模式，也没有把 Companion 注册为原版联机 Farmhand。
 
-参考项目和本 Demo 都采用“可见 NPC + shadow farmer”的职责分离：NPC 负责可见位置和寻路，shadow farmer 负责调用 Farmer/Tool/Item 等游戏机制。由于 shadow farmer 不是原版网络玩家，本 Demo 的 `warp` 是 Mod 内部的显式对象移动，不会创建第二个本地游戏客户端，也不会把它描述成真实联机角色。
+参考项目和本 Demo 都采用“可见 NPC + shadow farmer”的职责分离：NPC 负责可见位置和寻路，shadow farmer 负责调用 Farmer/Tool/Item 等游戏机制。参考项目的 Follow 会在同地图内寻路，在玩家切换地图时将 NPC 放到玩家所在地图；本 Demo 的 Follow 方案采用相同的 Mod 内自动 warp 思路。由于 shadow farmer 不是原版网络玩家，`warp` 是 Mod 内部的显式对象移动，不会创建第二个本地游戏客户端，也不会把它描述成真实联机角色。
 
 ## 当前限制
 
 - 只支持一个 actor：`companion-1`；
 - 直控入口是 CLI，不是 MCP，不是游戏内按键；
-- 没有自主跟随、农场、采矿或钓鱼调度器；
-- `warp` 可以把 Companion 显式移动到另一个已加载地点，但没有跨地图自主寻路；
+- Follow 命令和 Mod 内跟随任务尚未实现；当前没有农场、采矿或钓鱼调度器；
+- `warp` 已经可以把 Companion 显式移动到另一个已加载地点；Follow 方案会复用该能力实现玩家换地图后的自动 warp；
 - Companion 是否拥有鱼竿、武器以及动作是否可执行，取决于 shadow farmer 的实际背包和游戏前置条件；
 - `say` 只写入游戏聊天框；`bubble` 只显示临时头顶气泡，不会打开 NPC DialogueBox；
 - 状态是有限投影，不是完整存档或完整游戏对象图；
@@ -767,5 +893,10 @@ Mod 项目目标框架为 `net6.0`。Mac 可以安装 .NET SDK 编译 C# 工程�
 - [x] 所有 action 命令默认异步提交并立即返回 request ID；
 - [x] CLI 支持按 request ID 等待结果和从另一个进程发送取消请求；
 - [x] Fake Mod 覆盖 pending 取消优先级和目标结果关联；
+- [ ] CLI 增加 `follow [--distance <tiles>]` 并异步返回长期任务 request ID；
+- [ ] Mod 增加 FollowTask，在同地图内按 Tick 寻路并在跨地图时同步 warp NPC 与 shadow farmer；
+- [ ] Follow 复用统一 cancel 机制，并在快照中写出 follow 目标和运行状态；
+- [ ] Fake Mod 覆盖 follow 请求、pending 状态和 cancel 关联；
+- [ ] Windows + SMAPI 真实游戏中验证 follow 的同地图寻路、跨地图 warp、路径阻塞和取消；
 - [ ] Windows + SMAPI 真实游戏中完成全部动作的阶段验证；
 - [ ] 在真实游戏中验证不同地点、工具、作物、箱子、怪物和鱼竿状态机的版本兼容性。
