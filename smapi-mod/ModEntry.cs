@@ -104,6 +104,7 @@ internal sealed class ModEntry : Mod
 
         ProcessPendingCancellationRequests();
         FinishMoveIfReady(_moveExecutor?.Tick());
+        FinishActionIfReady(_companion?.TickFollow());
         FinishActionIfReady(_companion?.TickFishingAction());
         FinishBubbleIfReady();
         ProcessPendingRequests();
@@ -253,6 +254,9 @@ internal sealed class ModEntry : Mod
                 case "move_to":
                     StartMoveTo(request, processingPath);
                     break;
+                case "follow":
+                    StartFollow(request, processingPath);
+                    break;
                 case "face_direction":
                     ExecuteFaceDirection(request, processingPath);
                     break;
@@ -379,6 +383,29 @@ internal sealed class ModEntry : Mod
         WriteMoveResult(completion);
         Archive(_activeAction.ProcessingPath);
         _activeAction = null;
+    }
+
+    private void StartFollow(Envelope<JsonElement> request, string processingPath)
+    {
+        var payload = Deserialize<FollowPayload>(request);
+        if (!TryValidateActor(request, "follow", out var actorId))
+        {
+            Archive(processingPath);
+            return;
+        }
+
+        object? data = null;
+        ErrorDetail? error = null;
+        var success = _companion is not null
+            && _companion.TryStartFollow(request.RequestId!, payload.TargetActorId, payload.Distance, out data, out error);
+        if (!success)
+        {
+            WriteActionResult(request.RequestId!, "follow", actorId, false, null, error);
+            Archive(processingPath);
+            return;
+        }
+
+        _activeAction = new ActiveAction(request.RequestId!, "follow", processingPath, actorId, data);
     }
 
     private void ExecuteFaceDirection(Envelope<JsonElement> request, string processingPath)
@@ -844,6 +871,10 @@ internal sealed class ModEntry : Mod
                     _companion.TrySetAutoCombat(false, out error);
                 FinishActiveAction("cancelled", _activeAction.Data, error ?? new ErrorDetail { Code = code, Message = message });
                 return true;
+            case "follow":
+                var followCompletion = _companion?.CancelFollow(code, message);
+                FinishActionIfReady(followCompletion);
+                return followCompletion is not null;
             default:
                 return false;
         }

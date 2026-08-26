@@ -29,6 +29,11 @@ pub enum ActionRequestPayload {
         x: i32,
         y: i32,
     },
+    Follow {
+        actor_id: String,
+        target_actor_id: String,
+        distance: u32,
+    },
     FaceDirection {
         actor_id: String,
         direction: Direction,
@@ -136,6 +141,7 @@ impl ActionRequestPayload {
             Self::Ping { .. } => "ping",
             Self::MoveRelative { .. } => "move_relative",
             Self::MoveTo { .. } => "move_to",
+            Self::Follow { .. } => "follow",
             Self::FaceDirection { .. } => "face_direction",
             Self::UseTool { .. } => "use_tool",
             Self::Interact { .. } => "interact",

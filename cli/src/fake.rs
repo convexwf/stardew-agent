@@ -70,6 +70,7 @@ pub fn run(
             .and_then(|companion| companion.get("auto_combat"))
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        follow: None,
     };
     let mut latest_write_sequence = latest
         .as_ref()
@@ -152,6 +153,15 @@ struct FakeState {
     location: String,
     facing_direction: String,
     auto_combat: bool,
+    follow: Option<FakeFollow>,
+}
+
+struct FakeFollow {
+    request_id: String,
+    target_actor_id: String,
+    distance: u32,
+    state: String,
+    warp_count: u32,
 }
 
 fn process_pending(
@@ -187,17 +197,21 @@ fn process_pending(
         Ok(content) => match serde_json::from_str::<ActionRequest>(&content) {
             Ok(request) => {
                 if matches!(&request.payload, ActionRequestPayload::Cancel { .. }) {
-                    execute_cancel_request(request, pending, processing, archive, results)?
+                    Some(execute_cancel_request(request, pending, processing, archive, results, state)?)
+                } else if matches!(&request.payload, ActionRequestPayload::Follow { .. }) {
+                    start_follow_request(request, state)?
                 } else {
-                    validate_and_execute(request, companion_tile, state, mod_tick)
+                    Some(validate_and_execute(request, companion_tile, state, mod_tick))
                 }
             }
-            Err(error) => failure(&request_id, None, None, "invalid_request", error.to_string()),
+            Err(error) => Some(failure(&request_id, None, None, "invalid_request", error.to_string())),
         },
-        Err(error) => failure(&request_id, None, None, "read_error", error.to_string()),
+        Err(error) => Some(failure(&request_id, None, None, "read_error", error.to_string())),
     };
 
-    atomic_write_json(&results.join(format!("{request_id}.json")), &result)?;
+    if let Some(result) = result {
+        atomic_write_json(&results.join(format!("{request_id}.json")), &result)?;
+    }
     let _ = fs::rename(&processing_path, archive.join(file_name));
     Ok(true)
 }
@@ -216,6 +230,7 @@ fn execute_cancel_request(
     processing: &Path,
     archive: &Path,
     results: &Path,
+    state: &mut FakeState,
 ) -> Result<Envelope<Value>> {
     let request_id = request.request_id.as_deref().unwrap_or("unknown");
     let ActionRequestPayload::Cancel {
@@ -241,6 +256,34 @@ fn execute_cancel_request(
             Some(&actor_id),
             "invalid_target_request",
             "target_request_id must not be empty".to_owned(),
+        ));
+    }
+
+    if state
+        .follow
+        .as_ref()
+        .map(|follow| follow.request_id == target_request_id.trim())
+        .unwrap_or(false)
+    {
+        let follow = state.follow.take().expect("follow state was checked above");
+        let target_result = cancelled(
+            &follow.request_id,
+            "follow",
+            COMPANION_ID,
+            "cancelled_by_request",
+            "action cancelled by a cancel request",
+        );
+        atomic_write_json(&results.join(format!("{}.json", follow.request_id)), &target_result)?;
+        return Ok(succeeded(
+            request_id,
+            "cancel",
+            &actor_id,
+            json!({
+                "target_request_id": target_request_id,
+                "target_action": "follow",
+                "target_status": "cancelled",
+                "cancelled": true
+            }),
         ));
     }
 
@@ -296,6 +339,82 @@ fn execute_cancel_request(
         "request_not_found",
         format!("request not found: {}", target_request_id.trim()),
     ))
+}
+
+fn start_follow_request(request: ActionRequest, state: &mut FakeState) -> Result<Option<Envelope<Value>>> {
+    let request_id = request.request_id.as_deref().unwrap_or("unknown");
+    if request.schema_version != SCHEMA_VERSION {
+        return Ok(Some(failure(
+            request_id,
+            None,
+            None,
+            "unsupported_schema",
+            format!("unsupported schema version: {}", request.schema_version),
+        )));
+    }
+    if request.message_type != "action.request" || request.request_id.is_none() {
+        return Ok(Some(failure(
+            request_id,
+            None,
+            None,
+            "invalid_request",
+            "request envelope is invalid".to_owned(),
+        )));
+    }
+
+    let ActionRequestPayload::Follow {
+        actor_id,
+        target_actor_id,
+        distance,
+    } = request.payload
+    else {
+        unreachable!();
+    };
+    if actor_id != COMPANION_ID {
+        return Ok(Some(failure(
+            request_id,
+            Some("follow"),
+            Some(&actor_id),
+            "unsupported_actor",
+            format!("only {COMPANION_ID} is available in this demo"),
+        )));
+    }
+    if target_actor_id != "player" {
+        return Ok(Some(failure(
+            request_id,
+            Some("follow"),
+            Some(&actor_id),
+            "unsupported_follow_target",
+            "the only supported follow target is player".to_owned(),
+        )));
+    }
+    if !(1..=8).contains(&distance) {
+        return Ok(Some(failure(
+            request_id,
+            Some("follow"),
+            Some(&actor_id),
+            "invalid_distance",
+            "distance must be between 1 and 8".to_owned(),
+        )));
+    }
+    if state.follow.is_some() {
+        return Ok(Some(failure(
+            request_id,
+            Some("follow"),
+            Some(&actor_id),
+            "busy",
+            "the companion is already following the player".to_owned(),
+        )));
+    }
+
+    state.follow = Some(FakeFollow {
+        request_id: request_id.to_owned(),
+        target_actor_id,
+        distance,
+        state: "following".to_owned(),
+        warp_count: 0,
+    });
+    Ok(None)
 }
 
 fn validate_and_execute(
@@ -357,6 +476,15 @@ fn validate_and_execute(
             );
         }
     }
+    if state.follow.is_some() {
+        return failure(
+            request_id,
+            Some(action),
+            Some(actor_id),
+            "busy",
+            "the companion is already following the player".to_owned(),
+        );
+    }
 
     execute_request(request, companion_tile, state, mod_tick)
 }
@@ -366,6 +494,7 @@ fn action_actor_id(payload: &ActionRequestPayload) -> &str {
         ActionRequestPayload::Ping { actor_id }
         | ActionRequestPayload::MoveRelative { actor_id, .. }
         | ActionRequestPayload::MoveTo { actor_id, .. }
+        | ActionRequestPayload::Follow { actor_id, .. }
         | ActionRequestPayload::FaceDirection { actor_id, .. }
         | ActionRequestPayload::UseTool { actor_id, .. }
         | ActionRequestPayload::Interact { actor_id, .. }
@@ -387,6 +516,7 @@ fn action_name(payload: &ActionRequestPayload) -> &'static str {
         ActionRequestPayload::Ping { .. } => "ping",
         ActionRequestPayload::MoveRelative { .. } => "move_relative",
         ActionRequestPayload::MoveTo { .. } => "move_to",
+        ActionRequestPayload::Follow { .. } => "follow",
         ActionRequestPayload::FaceDirection { .. } => "face_direction",
         ActionRequestPayload::UseTool { .. } => "use_tool",
         ActionRequestPayload::Interact { .. } => "interact",
@@ -445,6 +575,13 @@ fn execute_request(
                 json!({"x": x, "y": y}),
             )
         }
+        ActionRequestPayload::Follow { .. } => failure(
+            &request_id,
+            Some("follow"),
+            Some(COMPANION_ID),
+            "invalid_request",
+            "follow requests must be started by the follow task handler".to_owned(),
+        ),
         ActionRequestPayload::FaceDirection {
             actor_id,
             direction,
@@ -690,6 +827,7 @@ fn snapshot_envelope(
     state: &FakeState,
     snapshot_index: usize,
 ) -> Envelope<Value> {
+    let follow = state.follow.as_ref();
     Envelope {
         schema_version: SCHEMA_VERSION.to_owned(),
         message_type: "snapshot".to_owned(),
@@ -717,13 +855,21 @@ fn snapshot_envelope(
                 "max_stamina": 270,
                 "inventory_count": 0,
                 "inventory": [],
-                "mode": "direct",
-                "status": "idle",
-                "current_action": null,
+                "mode": if follow.is_some() { "follow" } else { "direct" },
+                "status": if follow.is_some() { "following" } else { "idle" },
+                "current_action": follow.map(|_| "follow"),
                 "world_ready": true,
-                "busy": false,
+                "busy": follow.is_some(),
                 "auto_combat": state.auto_combat,
-                "capabilities": ["move_relative", "move_to", "face_direction", "use_tool", "interact", "warp_to", "observe", "get_inventory", "attack", "cast_fishing_rod", "set_auto_combat", "eat_item", "cancel"]
+                "follow": follow.map(|follow| json!({
+                    "target_actor_id": follow.target_actor_id,
+                    "distance": follow.distance,
+                    "state": follow.state,
+                    "target_location": "Farm",
+                    "target_tile": {"x": player_tile.0, "y": player_tile.1},
+                    "warp_count": follow.warp_count
+                })),
+                "capabilities": ["move_relative", "move_to", "face_direction", "use_tool", "interact", "warp_to", "observe", "get_inventory", "attack", "cast_fishing_rod", "set_auto_combat", "eat_item", "say", "bubble", "follow", "cancel"]
             }
         }),
     }

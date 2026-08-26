@@ -68,6 +68,18 @@ internal sealed class MoveToPayload
     public int Y { get; set; }
 }
 
+internal sealed class FollowPayload
+{
+    [JsonPropertyName("actor_id")]
+    public string ActorId { get; set; } = "companion-1";
+
+    [JsonPropertyName("target_actor_id")]
+    public string TargetActorId { get; set; } = "player";
+
+    [JsonPropertyName("distance")]
+    public int Distance { get; set; } = 2;
+}
+
 internal sealed class FaceDirectionPayload
 {
     [JsonPropertyName("actor_id")]
@@ -378,8 +390,39 @@ internal sealed class CompanionInfo
     [JsonPropertyName("auto_combat")]
     public bool AutoCombat { get; set; }
 
+    [JsonPropertyName("follow")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public FollowInfo? Follow { get; set; }
+
     [JsonPropertyName("capabilities")]
     public List<string> Capabilities { get; set; } = new();
+}
+
+internal sealed class FollowInfo
+{
+    [JsonPropertyName("target_actor_id")]
+    public string TargetActorId { get; set; } = "player";
+
+    [JsonPropertyName("distance")]
+    public int Distance { get; set; }
+
+    [JsonPropertyName("state")]
+    public string State { get; set; } = "following";
+
+    [JsonPropertyName("target_location")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TargetLocation { get; set; }
+
+    [JsonPropertyName("target_tile")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public TileDto? TargetTile { get; set; }
+
+    [JsonPropertyName("warp_count")]
+    public int WarpCount { get; set; }
+
+    [JsonPropertyName("last_warp_location")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? LastWarpLocation { get; set; }
 }
 
 internal sealed class GameInfo

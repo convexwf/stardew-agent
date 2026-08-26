@@ -95,6 +95,11 @@ enum Command {
         #[arg(long)]
         y: i32,
     },
+    /// Continuously follow the host farmer in the Mod.
+    Follow {
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(1..=8))]
+        distance: u32,
+    },
     /// Change the Companion facing direction.
     #[command(alias = "face_direction")]
     Face {
@@ -272,6 +277,14 @@ fn run() -> Result<()> {
                 actor_id: COMPANION_ID.to_owned(),
                 x,
                 y,
+            },
+        ),
+        Command::Follow { distance } => submit_and_print(
+            &bridge,
+            ActionRequestPayload::Follow {
+                actor_id: COMPANION_ID.to_owned(),
+                target_actor_id: "player".to_owned(),
+                distance,
             },
         ),
         Command::Face { direction } => submit_and_print(

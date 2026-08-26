@@ -505,3 +505,62 @@ fn fake_mod_prioritizes_cancel_and_cancels_pending_action() {
     assert_eq!(cancel_result["payload"]["data"]["cancelled"], true);
     fs::remove_dir_all(bridge.root).unwrap();
 }
+
+#[test]
+fn cli_follow_stays_pending_until_cancelled() {
+    let _lock = fake_mod_lock();
+    let bridge = temp_bridge();
+    bridge.ensure_layout().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fake-mod"))
+        .arg("--bridge-dir")
+        .arg(&bridge.root)
+        .arg("--latest-interval-ms")
+        .arg("50")
+        .spawn()
+        .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stardew-cli"))
+        .arg("--bridge-dir")
+        .arg(&bridge.root)
+        .arg("follow")
+        .arg("--distance")
+        .arg("2")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "CLI stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(receipt["status"], "accepted");
+    assert_eq!(receipt["action"], "follow");
+    let follow_request_id = receipt["request_id"].as_str().unwrap().to_owned();
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut following = false;
+    while Instant::now() < deadline {
+        if let Some(snapshot) = bridge.latest_snapshot().unwrap() {
+            if snapshot.payload["companion"]["current_action"] == "follow" {
+                following = true;
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(following, "fake mod never exposed the active follow state");
+    assert!(bridge.read_result(&follow_request_id).unwrap().is_none());
+
+    let cancel_request_id = bridge
+        .submit(ActionRequestPayload::Cancel {
+            actor_id: COMPANION_ID.to_owned(),
+            target_request_id: follow_request_id.clone(),
+        })
+        .unwrap();
+    let cancel_result = bridge.wait(&cancel_request_id, 2_000).unwrap();
+    let follow_result = bridge.wait(&follow_request_id, 2_000).unwrap();
+    assert_eq!(cancel_result["payload"]["status"], "succeeded");
+    assert_eq!(cancel_result["payload"]["data"]["target_action"], "follow");
+    assert_eq!(follow_result["payload"]["status"], "cancelled");
+    assert_eq!(follow_result["payload"]["action"], "follow");
+
+    child.kill().unwrap();
+    let _ = child.wait();
+    fs::remove_dir_all(bridge.root).unwrap();
+}

@@ -26,6 +26,20 @@ internal sealed class CompanionController
     private bool _fishingActive;
     private string? _fishingRequestId;
     private int _autoCombatCooldown;
+    private bool _followActive;
+    private string? _followRequestId;
+    private int _followDistance;
+    private int _followRepathCooldown;
+    private int _followBlockedTicks;
+    private Point _followLastTargetTile;
+    private string _followState = "idle";
+    private int _followWarpCount;
+    private string? _followLastWarpLocation;
+
+    private const int FollowMaxDistance = 8;
+    private const int FollowEmergencyWarpDistance = 10;
+    private const int FollowRepathInterval = 15;
+    private const int FollowBlockedTimeout = 60;
 
     public CompanionController(IModHelper helper, IMonitor monitor)
     {
@@ -35,7 +49,7 @@ internal sealed class CompanionController
 
     public bool IsSpawned => _visual is not null && _shadow is not null;
 
-    public bool IsBusy => _activeMove is not null || _fishingActive || _autoCombat || HasSpeechBubble;
+    public bool IsBusy => _activeMove is not null || _fishingActive || _autoCombat || _followActive || HasSpeechBubble;
 
     public bool IsFishingActive => _fishingActive;
 
@@ -43,10 +57,13 @@ internal sealed class CompanionController
 
     public string? CurrentAction => _activeMove?.Action
         ?? (_fishingActive ? "cast_fishing_rod" : null)
+        ?? (_followActive ? "follow" : null)
         ?? (_autoCombat ? "set_auto_combat" : null)
         ?? (HasSpeechBubble ? "bubble" : null);
 
     public bool AutoCombat => _autoCombat;
+
+    public bool IsFollowing => _followActive;
 
     public void EnsureSpawned()
     {
@@ -151,6 +168,264 @@ internal sealed class CompanionController
             Error = timedOut
                 ? new ErrorDetail { Code = "movement_timeout", Message = "the companion did not reach the target tile" }
                 : null
+        };
+    }
+
+    public bool TryStartFollow(string requestId, string targetActorId, int distance, out object? data, out ErrorDetail? error)
+    {
+        data = null;
+        error = null;
+        if (!string.Equals(targetActorId, "player", StringComparison.OrdinalIgnoreCase))
+        {
+            error = new ErrorDetail { Code = "unsupported_follow_target", Message = "the only supported follow target is player" };
+            return false;
+        }
+        if (distance is < 1 or > FollowMaxDistance)
+        {
+            error = new ErrorDetail { Code = "invalid_distance", Message = $"distance must be between 1 and {FollowMaxDistance}" };
+            return false;
+        }
+
+        EnsureSpawned();
+        if (!Context.IsWorldReady || Game1.player?.currentLocation is null || !IsSpawned)
+        {
+            error = new ErrorDetail { Code = "follow_target_unavailable", Message = "the player or current world is unavailable" };
+            return false;
+        }
+        if (_activeMove is not null || _fishingActive || _autoCombat || HasSpeechBubble || _followActive)
+        {
+            error = new ErrorDetail { Code = "busy", Message = "the companion is already running another action" };
+            return false;
+        }
+
+        _followActive = true;
+        _followRequestId = requestId;
+        _followDistance = distance;
+        _followRepathCooldown = 0;
+        _followBlockedTicks = 0;
+        _followLastTargetTile = Point.Zero;
+        _followState = "following";
+        _followWarpCount = 0;
+        _followLastWarpLocation = null;
+        data = new { target_actor_id = "player", distance };
+        return true;
+    }
+
+    public ActionCompletion? TickFollow()
+    {
+        if (!_followActive || _followRequestId is null)
+            return null;
+        if (!Context.IsWorldReady || Game1.player?.currentLocation is null || _visual is null || _shadow is null)
+            return FinishFollow("failed", "follow_target_unavailable", "the player or current world is unavailable");
+
+        var player = Game1.player;
+        var playerLocation = player.currentLocation!;
+        var playerTile = new Point((int)player.Tile.X, (int)player.Tile.Y);
+        if (_visual.currentLocation is null || !string.Equals(_visual.currentLocation.Name, playerLocation.Name, StringComparison.Ordinal))
+        {
+            if (!TryWarpToFollowTarget(playerLocation, out var warpError))
+                return FinishFollow("failed", warpError?.Code ?? "follow_warp_failed", warpError?.Message ?? "the companion could not warp to the player");
+            _followLastTargetTile = playerTile;
+            return null;
+        }
+
+        SyncShadow();
+        if (_followRepathCooldown > 0)
+            _followRepathCooldown--;
+
+        var distance = Vector2.Distance(_visual.Tile, player.Tile);
+        if (distance <= _followDistance)
+        {
+            _visual.controller = null;
+            _followState = "waiting";
+            _followBlockedTicks = 0;
+            _followLastTargetTile = playerTile;
+            return null;
+        }
+
+        var targetMoved = _followLastTargetTile == Point.Zero
+            || Math.Abs(playerTile.X - _followLastTargetTile.X) >= 2
+            || Math.Abs(playerTile.Y - _followLastTargetTile.Y) >= 2;
+        if (targetMoved && _visual.controller is not null && _followRepathCooldown <= 0)
+            _visual.controller = null;
+
+        if (distance > FollowEmergencyWarpDistance)
+        {
+            if (!TryWarpToFollowTarget(playerLocation, out var warpError))
+                return FinishFollow("failed", warpError?.Code ?? "follow_warp_failed", warpError?.Message ?? "the companion could not warp near the player");
+            _followLastTargetTile = playerTile;
+            return null;
+        }
+
+        if (_visual.controller is null)
+        {
+            if (_followRepathCooldown > 0)
+            {
+                _followBlockedTicks++;
+            }
+            else if (!TryStartFollowPath(playerLocation, playerTile, out var pathError))
+            {
+                _followState = "blocked";
+                if (!TryWarpToFollowTarget(playerLocation, out var warpError))
+                    return FinishFollow("failed", "follow_path_blocked", pathError?.Message ?? warpError?.Message ?? "the companion could not follow the player");
+            }
+
+            if (_followBlockedTicks > FollowBlockedTimeout)
+            {
+                _followState = "blocked";
+                if (!TryWarpToFollowTarget(playerLocation, out var warpError))
+                    return FinishFollow("failed", "follow_path_blocked", warpError?.Message ?? "the companion path is blocked");
+                _followLastTargetTile = playerTile;
+            }
+        }
+
+        _followState = "following";
+        _followLastTargetTile = playerTile;
+        return null;
+    }
+
+    public ActionCompletion? CancelFollow(string code, string message)
+    {
+        if (!_followActive || _followRequestId is null)
+            return null;
+
+        var completion = new ActionCompletion
+        {
+            RequestId = _followRequestId,
+            Action = "follow",
+            Status = "cancelled",
+            Data = GetFollowInfo(),
+            Error = new ErrorDetail { Code = code, Message = message }
+        };
+        ClearFollowState();
+        return completion;
+    }
+
+    private ActionCompletion FinishFollow(string status, string code, string message)
+    {
+        var completion = new ActionCompletion
+        {
+            RequestId = _followRequestId ?? "unknown",
+            Action = "follow",
+            Status = status,
+            Data = GetFollowInfo(),
+            Error = new ErrorDetail { Code = code, Message = message }
+        };
+        ClearFollowState();
+        return completion;
+    }
+
+    private bool TryStartFollowPath(GameLocation location, Point playerTile, out ErrorDetail? error)
+    {
+        error = null;
+        if (_visual is null)
+        {
+            error = new ErrorDetail { Code = "follow_target_unavailable", Message = "the companion is not spawned" };
+            return false;
+        }
+
+        var target = FindFollowTargetTile(location, playerTile, _followDistance);
+        if (target is null)
+        {
+            error = new ErrorDetail { Code = "follow_path_blocked", Message = "no passable tile was found near the player" };
+            return false;
+        }
+
+        try
+        {
+            _visual.controller = new PathFindController(_visual, location, target.Value, 2);
+            _followRepathCooldown = FollowRepathInterval;
+            _followBlockedTicks = 0;
+            _followState = "following";
+            return true;
+        }
+        catch (Exception exception)
+        {
+            error = new ErrorDetail { Code = "follow_path_blocked", Message = exception.Message };
+            return false;
+        }
+    }
+
+    private bool TryWarpToFollowTarget(GameLocation location, out ErrorDetail? error)
+    {
+        error = null;
+        if (_visual is null || _shadow is null || Game1.player is null)
+        {
+            error = new ErrorDetail { Code = "follow_warp_failed", Message = "the companion or player is unavailable" };
+            return false;
+        }
+
+        var target = FindFollowTargetTile(location, new Point((int)Game1.player.Tile.X, (int)Game1.player.Tile.Y), _followDistance);
+        if (target is null)
+        {
+            error = new ErrorDetail { Code = "follow_warp_failed", Message = "no passable tile was found near the player" };
+            return false;
+        }
+
+        _visual.currentLocation?.characters.Remove(_visual);
+        _visual.controller = null;
+        var position = new Vector2(target.Value.X * Game1.tileSize, target.Value.Y * Game1.tileSize);
+        _visual.Position = position;
+        _visual.currentLocation = location;
+        location.addCharacter(_visual);
+        _shadow.Position = position;
+        _shadow.currentLocation = location;
+        SyncShadow();
+        _followState = "warping";
+        _followWarpCount++;
+        _followLastWarpLocation = location.Name;
+        _followRepathCooldown = FollowRepathInterval;
+        _followBlockedTicks = 0;
+        _monitor.Log($"Warped {DisplayName} to follow the player in {location.Name} at ({target.Value.X},{target.Value.Y}).", LogLevel.Debug);
+        return true;
+    }
+
+    private static Point? FindFollowTargetTile(GameLocation location, Point playerTile, int preferredDistance)
+    {
+        var distance = Math.Max(1, preferredDistance);
+        var offsets = new[]
+        {
+            new Point(distance, 0), new Point(-distance, 0), new Point(0, -distance), new Point(0, distance),
+            new Point(1, 0), new Point(-1, 0), new Point(0, -1), new Point(0, 1)
+        };
+        foreach (var offset in offsets)
+        {
+            var tile = new Point(playerTile.X + offset.X, playerTile.Y + offset.Y);
+            var mapTile = new xTile.Dimensions.Location(tile.X, tile.Y);
+            if (location.isTilePassable(mapTile, Game1.viewport))
+                return tile;
+        }
+        return null;
+    }
+
+    private void ClearFollowState()
+    {
+        if (_visual is not null)
+            _visual.controller = null;
+        _followActive = false;
+        _followRequestId = null;
+        _followDistance = 0;
+        _followRepathCooldown = 0;
+        _followBlockedTicks = 0;
+        _followLastTargetTile = Point.Zero;
+        _followState = "idle";
+        _followWarpCount = 0;
+        _followLastWarpLocation = null;
+    }
+
+    private FollowInfo? GetFollowInfo()
+    {
+        if (!_followActive)
+            return null;
+        return new FollowInfo
+        {
+            TargetActorId = "player",
+            Distance = _followDistance,
+            State = _followState,
+            TargetLocation = Game1.player?.currentLocation?.Name,
+            TargetTile = Game1.player is null ? null : new TileDto { X = (int)Game1.player.Tile.X, Y = (int)Game1.player.Tile.Y },
+            WarpCount = _followWarpCount,
+            LastWarpLocation = _followLastWarpLocation
         };
     }
 
@@ -625,16 +900,17 @@ internal sealed class CompanionController
             MaxStamina = _shadow?.MaxStamina ?? 0,
             InventoryCount = inventory.Count,
             Inventory = inventory,
-            Mode = "direct",
-            Status = _activeMove is not null ? "moving" : _fishingActive ? "fishing" : _autoCombat ? "auto-combat" : HasSpeechBubble ? "bubble" : "idle",
+            Mode = _followActive ? "follow" : "direct",
+            Status = _activeMove is not null ? "moving" : _fishingActive ? "fishing" : _followActive ? "following" : _autoCombat ? "auto-combat" : HasSpeechBubble ? "bubble" : "idle",
             CurrentAction = CurrentAction,
             WorldReady = Context.IsWorldReady && IsSpawned,
             Busy = IsBusy,
             AutoCombat = _autoCombat,
+            Follow = GetFollowInfo(),
             Capabilities = new List<string>
             {
                 "move_relative", "move_to", "face_direction", "use_tool", "interact", "warp_to",
-                "observe", "get_inventory", "attack", "cast_fishing_rod", "set_auto_combat", "eat_item", "say", "bubble", "cancel"
+                "observe", "get_inventory", "attack", "cast_fishing_rod", "set_auto_combat", "eat_item", "say", "bubble", "follow", "cancel"
             }
         };
     }
@@ -649,6 +925,7 @@ internal sealed class CompanionController
         _shadow?.WakeUp();
         _fishingActive = false;
         _fishingRequestId = null;
+        ClearFollowState();
     }
 
     public void Cleanup()
@@ -663,6 +940,7 @@ internal sealed class CompanionController
         _fishingRequestId = null;
         _autoCombat = false;
         _autoCombatCooldown = 0;
+        ClearFollowState();
     }
 
     private bool TryGetReady(
