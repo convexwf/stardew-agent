@@ -103,7 +103,7 @@ flowchart LR
         A[actions/archive/*.json]
         R[results/*.json]
         S[snapshots/snapshot-latest.json]
-        H[snapshots/snapshot-{index}.json]
+        H["snapshots/snapshot-{index}.json"]
         E[errors/*.json]
     end
 
