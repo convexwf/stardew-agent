@@ -5,7 +5,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | **文档标题** | CLI 工具系统通信 Demo 技术实现方案 |
-| **文档版本** | v0.12 |
+| **文档版本** | v0.13 |
 | **创建日期** | 2026-08-23 |
 | **更新日期** | 2026-08-26 |
 | **文档类型** | 技术实现方案 |
@@ -194,15 +194,26 @@ Mod 不使用阻塞等待、线程强杀或 `Thread.Sleep` 实现取消。`Updat
 
 ### CLI 等待与取消
 
-同步 CLI 等待结果时，CLI 进程本身会阻塞等待，但不会阻塞游戏主线程。为了让长距离 `move_to` 可以在等待期间被中断，CLI 需要提供分离生命周期：先提交并立即打印 `request_id`，再由另一个命令等待结果或发送 `cancel <request-id>`。推荐的接口形状是：
+所有提交 action 的 CLI 命令都采用异步语义：命令只负责生成并写入请求，成功写入后立即输出请求受理结果和 `request_id`，不等待 Mod 执行动作。需要等待终态时使用独立的 `wait` 命令；需要取消时使用独立的 `cancel` 命令。典型调用链是：
 
 ```text
-stardew-cli move-to --x 120 --y 80 --detach
-stardew-cli wait <request-id>
-stardew-cli cancel <request-id>
+stardew-cli move-to --x 120 --y 80
+stardew-cli wait <move-request-id>
+stardew-cli cancel <move-request-id>
+stardew-cli wait <cancel-request-id>
 ```
 
-`--detach` 只改变 CLI 的等待行为，不改变 Bridge 协议；请求仍然由 Mod 按相同的 `pending` → `processing` → `results` / `archive` 链路执行。CLI 超时也不等于取消，调用方必须显式发出 `cancel`。
+动作命令的立即返回值是受理回执，例如：
+
+```json
+{
+  "status": "accepted",
+  "action": "move_to",
+  "request_id": "0c6c7d24-8a6d-4b99-9b40-3c1f10c7068f"
+}
+```
+
+动作命令、包括 `cancel` 自身，都不等待最终结果。`wait` 只是读取指定 request 的结果文件并等待终态，不会向 Mod 创建新的游戏动作。CLI 进程是否退出、是否由另一个进程执行 `cancel`，都不影响 Mod 继续处理请求。
 
 `action.result` 与 `snapshot` 的职责不同：
 
@@ -467,7 +478,7 @@ snapshot-0.json → snapshot-1.json → snapshot-2.json
 stardew-cli [--bridge-dir <bridge-directory>] <command>
 ```
 
-也可以设置 `STARDEW_BRIDGE_DIR`，省略全局参数。没有参数或环境变量时，CLI 使用自身可执行文件所在目录下的 `bridge/`。输出统一为 JSON；动作结果为失败状态时，CLI 同时打印结果并以非零退出码结束。
+也可以设置 `STARDEW_BRIDGE_DIR`，省略全局参数。没有参数或环境变量时，CLI 使用自身可执行文件所在目录下的 `bridge/`。输出统一为 JSON；提交 action 的命令只输出受理回执，最终动作结果由 `wait` 或 `result show` 获取。
 
 ### 状态、观察和诊断
 
@@ -483,6 +494,7 @@ stardew-cli [--bridge-dir <bridge-directory>] <command>
 | `snapshot read <index>` | 读取一个固定历史槽位 |
 | `request show <request-id>` | 查找请求及其所在目录 |
 | `result show <request-id>` | 读取已写入的结果 |
+| `wait <request-id>` | 等待并打印指定 request 的终态结果 |
 | `doctor` | 检查目录、latest、历史数量和临时文件 |
 | `cleanup --dry-run` | 预览结果、归档和错误文件清理范围 |
 | `cleanup` | 删除超过保留时长的结果、归档和错误 JSON |
@@ -515,15 +527,15 @@ stardew-cli [--bridge-dir <bridge-directory>] <command>
 
 `move_relative` 的 `ticks` 由 CLI 限制为 `1..=30`。`observe` 的 `radius` 由 CLI 和 Mod 共同限制为 `1..=16`。限制是为了避免单个请求无限占用游戏 tick 或产生过大的观察结果。
 
-为支持长距离 `move_to` 的中断，CLI 实现需要增加分离等待方式。同步模式保持现有命令形状；分离模式只提交请求并立即输出 request ID，`wait` 负责后续等待，`cancel` 负责从另一个 CLI 进程发送取消请求。以下接口属于本方案的待实现部分：
+所有 action 命令都必须异步提交并立即返回 request ID。以下接口属于本方案的待实现部分：
 
 ```text
-stardew-cli move-to --x 120 --y 80 --detach
+stardew-cli move-to --x 120 --y 80
 stardew-cli wait <request-id>
 stardew-cli cancel <request-id>
 ```
 
-所有动作命令都使用相同的 `request_id`、`wait` 和 `cancel` 机制，而不是为 `move_to` 单独设计一套取消协议。同步 CLI 的超时只停止等待，不会隐式取消动作。
+所有 action 命令都使用相同的 `request_id`、`wait` 和 `cancel` 机制，而不是为 `move_to` 单独设计一套取消协议。CLI 的等待超时只表示 `wait` 停止等待，不会隐式取消目标 action。
 
 ## SMAPI Mod 行为
 
@@ -727,7 +739,7 @@ Mod 项目目标框架为 `net6.0`。Mac 可以安装 .NET SDK 编译 C# 工程�
 - Companion 是否拥有鱼竿、武器以及动作是否可执行，取决于 shadow farmer 的实际背包和游戏前置条件；
 - `say` 只写入游戏聊天框；`bubble` 只显示临时头顶气泡，不会打开 NPC DialogueBox；
 - 当前代码的 `cancel` 仍主要覆盖移动；统一覆盖钓鱼、自动战斗、气泡和一次性 action 的取消语义尚待实现；
-- 当前 CLI 仍以同步等待为主，分离提交、`wait` 和跨进程取消接口尚待实现；
+- 当前 CLI 尚未切换为“所有 action 默认异步提交”，`wait` 和跨进程取消接口尚待实现；
 - 状态是有限投影，不是完整存档或完整游戏对象图；
 - 当前 Bridge 适用于同一台机器上的低频 CLI/Mod 通信，不承诺跨机器、多 CLI 并发写入或高频实时控制；
 - Fake Mod 只覆盖协议和文件链路，不能替代 Windows 游戏验证；
@@ -752,7 +764,8 @@ Mod 项目目标框架为 `net6.0`。Mac 可以安装 .NET SDK 编译 C# 工程�
 - [ ] 所有 action 登记统一任务状态，并在完成前支持 `cancel`；
 - [ ] `move_relative`、`move_to`、钓鱼、自动战斗和气泡的活动状态可被取消并完成清理；
 - [ ] 一次性和只读 action 具备统一的取消前检查及已完成结果语义；
-- [ ] CLI 支持分离提交、按 request ID 等待和跨进程取消；
+- [ ] 所有 action 命令默认异步提交并立即返回 request ID；
+- [ ] CLI 支持按 request ID 等待结果和从另一个进程发送取消请求；
 - [ ] Fake Mod 覆盖 pending、processing、运行中任务和已完成任务的取消竞态；
 - [ ] Windows + SMAPI 真实游戏中完成全部动作的阶段验证；
 - [ ] 在真实游戏中验证不同地点、工具、作物、箱子、怪物和鱼竿状态机的版本兼容性。
