@@ -551,9 +551,9 @@ internal sealed class ModEntry : Mod
             return;
         }
 
-        if (!payload.Enabled && _activeAction?.Action == "set_auto_combat")
+        if (!payload.Enabled && _activeAction is not null && _activeAction.Action == "set_auto_combat")
         {
-            FinishActiveAction("cancelled", "auto-combat disabled", "auto_combat_disabled");
+            FinishActiveAction("cancelled", _activeAction.Data, new ErrorDetail { Code = "auto_combat_disabled", Message = "auto-combat disabled" });
             WriteActionResult(request.RequestId!, "set_auto_combat", actorId, true, new { enabled = false }, null);
             Archive(processingPath);
             return;
