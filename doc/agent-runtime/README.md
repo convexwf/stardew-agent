@@ -28,6 +28,7 @@
 - [分阶段实现](#分阶段实现)
 - [验证与评测](#验证与评测)
 - [未决问题](#未决问题)
+- [相关文档](#相关文档)
 
 ## 文档定位
 
@@ -482,3 +483,7 @@ RL 训练指标与真实游戏任务成功率分开报告。独立模拟器或 F
 - 是否需要独立的可重置模拟器，以及它和真实游戏状态的差异如何度量；
 - Runtime 的本地状态、轨迹和模型调用日志的保留策略；
 - 多 Companion 或多 actor 出现后，actor lease 是否扩展为资源调度器。
+
+## 相关文档
+
+- [Agent Runtime 架构选型与演进方案](architecture-options.md)：比较有限循环、计划队列、Behavior Tree/GOAP、图运行时、Durable Workflow、Skill Library 和 RL 接入方式。
