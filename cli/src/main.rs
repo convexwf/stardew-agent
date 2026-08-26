@@ -39,8 +39,6 @@ enum Command {
     Inventory {
         #[arg(long, default_value = "companion-1")]
         actor_id: String,
-        #[arg(long, default_value_t = 5_000)]
-        timeout_ms: u64,
     },
     /// Request a live surroundings scan from the Mod.
     #[command(alias = "get-surroundings")]
@@ -49,8 +47,6 @@ enum Command {
         actor_id: String,
         #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u32).range(1..=16))]
         radius: u32,
-        #[arg(long, default_value_t = 5_000)]
-        timeout_ms: u64,
     },
     /// Inspect snapshot slots.
     Snapshot {
@@ -67,6 +63,12 @@ enum Command {
         #[command(subcommand)]
         command: ResultCommand,
     },
+    /// Wait for an already submitted action request to reach a terminal result.
+    Wait {
+        request_id: String,
+        #[arg(long, default_value_t = 30_000)]
+        timeout_ms: u64,
+    },
     /// Check Bridge directories, latest state and temporary files.
     Doctor,
     /// Remove old result, archive and error files.
@@ -77,18 +79,13 @@ enum Command {
         dry_run: bool,
     },
     /// Test the CLI -> Mod -> CLI request path.
-    Ping {
-        #[arg(long, default_value_t = 5_000)]
-        timeout_ms: u64,
-    },
+    Ping,
     /// Move the Companion by a bounded relative path.
     Move {
         #[arg(value_enum)]
         direction: Direction,
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..=30))]
         ticks: u32,
-        #[arg(long, default_value_t = 5_000)]
-        timeout_ms: u64,
     },
     /// Move the Companion to a target tile using game pathfinding.
     #[command(alias = "move_to")]
@@ -97,16 +94,12 @@ enum Command {
         x: i32,
         #[arg(long)]
         y: i32,
-        #[arg(long, default_value_t = 5_000)]
-        timeout_ms: u64,
     },
     /// Change the Companion facing direction.
     #[command(alias = "face_direction")]
     Face {
         #[arg(value_enum)]
         direction: Direction,
-        #[arg(long, default_value_t = 5_000)]
-        timeout_ms: u64,
     },
     /// Use a tool at a target tile.
     #[command(alias = "use_tool")]
@@ -117,8 +110,6 @@ enum Command {
         x: i32,
         #[arg(long)]
         y: i32,
-        #[arg(long, default_value_t = 5_000)]
-        timeout_ms: u64,
     },
     /// Interact with a tile, crop, chest, machine or ladder.
     Interact {
@@ -126,8 +117,6 @@ enum Command {
         x: i32,
         #[arg(long)]
         y: i32,
-        #[arg(long, default_value_t = 5_000)]
-        timeout_ms: u64,
     },
     /// Explicitly warp the Companion to a location and tile.
     #[command(alias = "warp-companion")]
@@ -138,35 +127,23 @@ enum Command {
         x: i32,
         #[arg(long)]
         y: i32,
-        #[arg(long, default_value_t = 5_000)]
-        timeout_ms: u64,
     },
     /// Attack the nearest monster in range.
-    Attack {
-        #[arg(long, default_value_t = 5_000)]
-        timeout_ms: u64,
-    },
+    Attack,
     /// Cast the Companion fishing rod.
     #[command(alias = "cast_fishing_rod")]
-    CastFishingRod {
-        #[arg(long, default_value_t = 5_000)]
-        timeout_ms: u64,
-    },
+    CastFishingRod,
     /// Toggle real-time Companion auto-combat.
     #[command(alias = "set_auto_combat")]
     SetAutoCombat {
         #[arg(long)]
         enabled: bool,
-        #[arg(long, default_value_t = 5_000)]
-        timeout_ms: u64,
     },
     /// Eat a food item from the Companion inventory.
     #[command(alias = "eat_item")]
     EatItem {
         #[arg(long)]
         slot: Option<usize>,
-        #[arg(long, default_value_t = 5_000)]
-        timeout_ms: u64,
     },
     /// Show a message from the Companion in the game's chat window.
     #[command(alias = "chat")]
@@ -174,8 +151,6 @@ enum Command {
         text: String,
         #[arg(long, default_value = "companion-1")]
         actor_id: String,
-        #[arg(long, default_value_t = 5_000)]
-        timeout_ms: u64,
     },
     /// Show a temporary speech bubble above the Companion.
     Bubble {
@@ -184,15 +159,9 @@ enum Command {
         actor_id: String,
         #[arg(long, default_value_t = 3_000, value_parser = clap::value_parser!(u64).range(250..=30_000))]
         duration_ms: u64,
-        #[arg(long, default_value_t = 5_000)]
-        timeout_ms: u64,
     },
-    /// Cancel the currently running Companion movement.
-    Cancel {
-        target_request_id: String,
-        #[arg(long, default_value_t = 5_000)]
-        timeout_ms: u64,
-    },
+    /// Cancel any not-yet-completed action request.
+    Cancel { target_request_id: String },
     /// Print state whenever latest_write_sequence changes.
     Watch {
         #[arg(long, default_value_t = 1_000)]
@@ -237,22 +206,13 @@ fn run() -> Result<()> {
         Command::World => print_section(&bridge, "game"),
         Command::Player => print_section(&bridge, "player"),
         Command::Companion { actor_id } => print_companion(&bridge, &actor_id),
-        Command::Inventory {
-            actor_id,
-            timeout_ms,
-        } => send_and_print(
+        Command::Inventory { actor_id } => submit_and_print(
             &bridge,
             ActionRequestPayload::GetInventory { actor_id },
-            timeout_ms,
         ),
-        Command::Observe {
-            actor_id,
-            radius,
-            timeout_ms,
-        } => send_and_print(
+        Command::Observe { actor_id, radius } => submit_and_print(
             &bridge,
             ActionRequestPayload::Observe { actor_id, radius },
-            timeout_ms,
         ),
         Command::Snapshot { command } => match command {
             SnapshotCommand::List => {
@@ -283,57 +243,45 @@ fn run() -> Result<()> {
         Command::Result { command } => match command {
             ResultCommand::Show { request_id } => print_optional(bridge.read_result(&request_id)?, "result"),
         },
+        Command::Wait {
+            request_id,
+            timeout_ms,
+        } => wait_and_print(&bridge, &request_id, timeout_ms),
         Command::Doctor => print_json(&bridge.doctor()?),
         Command::Cleanup {
             older_than_seconds,
             dry_run,
         } => print_json(&bridge.cleanup(older_than_seconds, dry_run)?),
-        Command::Ping { timeout_ms } => send_and_print(
+        Command::Ping => submit_and_print(
             &bridge,
             ActionRequestPayload::Ping {
                 actor_id: COMPANION_ID.to_owned(),
             },
-            timeout_ms,
         ),
-        Command::Move {
-            direction,
-            ticks,
-            timeout_ms,
-        } => send_and_print(
+        Command::Move { direction, ticks } => submit_and_print(
             &bridge,
             ActionRequestPayload::MoveRelative {
                 actor_id: COMPANION_ID.to_owned(),
                 direction,
                 ticks,
             },
-            timeout_ms,
         ),
-        Command::MoveTo { x, y, timeout_ms } => send_and_print(
+        Command::MoveTo { x, y } => submit_and_print(
             &bridge,
             ActionRequestPayload::MoveTo {
                 actor_id: COMPANION_ID.to_owned(),
                 x,
                 y,
             },
-            timeout_ms,
         ),
-        Command::Face {
-            direction,
-            timeout_ms,
-        } => send_and_print(
+        Command::Face { direction } => submit_and_print(
             &bridge,
             ActionRequestPayload::FaceDirection {
                 actor_id: COMPANION_ID.to_owned(),
                 direction,
             },
-            timeout_ms,
         ),
-        Command::UseTool {
-            tool,
-            x,
-            y,
-            timeout_ms,
-        } => send_and_print(
+        Command::UseTool { tool, x, y } => submit_and_print(
             &bridge,
             ActionRequestPayload::UseTool {
                 actor_id: COMPANION_ID.to_owned(),
@@ -341,23 +289,16 @@ fn run() -> Result<()> {
                 x,
                 y,
             },
-            timeout_ms,
         ),
-        Command::Interact { x, y, timeout_ms } => send_and_print(
+        Command::Interact { x, y } => submit_and_print(
             &bridge,
             ActionRequestPayload::Interact {
                 actor_id: COMPANION_ID.to_owned(),
                 x,
                 y,
             },
-            timeout_ms,
         ),
-        Command::Warp {
-            location,
-            x,
-            y,
-            timeout_ms,
-        } => send_and_print(
+        Command::Warp { location, x, y } => submit_and_print(
             &bridge,
             ActionRequestPayload::WarpTo {
                 actor_id: COMPANION_ID.to_owned(),
@@ -365,74 +306,51 @@ fn run() -> Result<()> {
                 x,
                 y,
             },
-            timeout_ms,
         ),
-        Command::Attack { timeout_ms } => send_and_print(
+        Command::Attack => submit_and_print(
             &bridge,
             ActionRequestPayload::Attack {
                 actor_id: COMPANION_ID.to_owned(),
             },
-            timeout_ms,
         ),
-        Command::CastFishingRod { timeout_ms } => send_and_print(
+        Command::CastFishingRod => submit_and_print(
             &bridge,
             ActionRequestPayload::CastFishingRod {
                 actor_id: COMPANION_ID.to_owned(),
             },
-            timeout_ms,
         ),
-        Command::SetAutoCombat {
-            enabled,
-            timeout_ms,
-        } => send_and_print(
+        Command::SetAutoCombat { enabled } => submit_and_print(
             &bridge,
             ActionRequestPayload::SetAutoCombat {
                 actor_id: COMPANION_ID.to_owned(),
                 enabled,
             },
-            timeout_ms,
         ),
-        Command::EatItem { slot, timeout_ms } => send_and_print(
+        Command::EatItem { slot } => submit_and_print(
             &bridge,
             ActionRequestPayload::EatItem {
                 actor_id: COMPANION_ID.to_owned(),
                 slot,
             },
-            timeout_ms,
         ),
-        Command::Say {
-            text,
-            actor_id,
-            timeout_ms,
-        } => send_and_print(
+        Command::Say { text, actor_id } => submit_and_print(
             &bridge,
             ActionRequestPayload::Say { actor_id, text },
-            timeout_ms,
         ),
-        Command::Bubble {
-            text,
-            actor_id,
-            duration_ms,
-            timeout_ms,
-        } => send_and_print(
+        Command::Bubble { text, actor_id, duration_ms } => submit_and_print(
             &bridge,
             ActionRequestPayload::Bubble {
                 actor_id,
                 text,
                 duration_ms,
             },
-            timeout_ms,
         ),
-        Command::Cancel {
-            target_request_id,
-            timeout_ms,
-        } => send_and_print(
+        Command::Cancel { target_request_id } => submit_and_print(
             &bridge,
             ActionRequestPayload::Cancel {
                 actor_id: COMPANION_ID.to_owned(),
                 target_request_id,
             },
-            timeout_ms,
         ),
         Command::Watch { interval_ms } => watch(&bridge, interval_ms),
     }
@@ -477,8 +395,13 @@ fn print_optional(value: Option<Value>, kind: &str) -> Result<()> {
     print_json(&value)
 }
 
-fn send_and_print(bridge: &Bridge, payload: ActionRequestPayload, timeout_ms: u64) -> Result<()> {
-    let result = bridge.send_and_wait(payload, timeout_ms)?;
+fn submit_and_print(bridge: &Bridge, payload: ActionRequestPayload) -> Result<()> {
+    let receipt = bridge.submit_receipt(payload)?;
+    print_json(&receipt)
+}
+
+fn wait_and_print(bridge: &Bridge, request_id: &str, timeout_ms: u64) -> Result<()> {
+    let result = bridge.wait(request_id, timeout_ms)?;
     print_result(&result)
 }
 

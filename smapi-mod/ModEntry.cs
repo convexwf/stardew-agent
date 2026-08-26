@@ -12,7 +12,7 @@ internal sealed class ModEntry : Mod
     private BridgeFileStore? _store;
     private CompanionController? _companion;
     private MoveExecutor? _moveExecutor;
-    private string? _activeProcessingPath;
+    private ActiveAction? _activeAction;
     private long _latestWriteSequence;
     private long _snapshotSequence;
     private int _latestSnapshotIndex = -1;
@@ -102,7 +102,10 @@ internal sealed class ModEntry : Mod
             }
         }
 
+        ProcessPendingCancellationRequests();
         FinishMoveIfReady(_moveExecutor?.Tick());
+        FinishActionIfReady(_companion?.TickFishingAction());
+        FinishBubbleIfReady();
         ProcessPendingRequests();
     }
 
@@ -127,6 +130,7 @@ internal sealed class ModEntry : Mod
 
     private void OnDayStarted(object? sender, DayStartedEventArgs e)
     {
+        CancelActiveAction("day_started", "the previous action was cancelled at day start");
         _companion?.WakeUp();
     }
 
@@ -137,7 +141,7 @@ internal sealed class ModEntry : Mod
 
     private void OnReturnedToTitle(object? sender, ReturnedToTitleEventArgs e)
     {
-        FinishMoveIfReady(_moveExecutor?.Cancel("world_not_ready", "the game returned to the title screen"));
+        CancelActiveAction("world_not_ready", "the game returned to the title screen");
         _companion?.Cleanup();
     }
 
@@ -150,6 +154,7 @@ internal sealed class ModEntry : Mod
         try
         {
             pendingFiles = Directory.EnumerateFiles(_store.Paths.Pending, "*.json")
+                .Where(path => !IsCancellationRequest(path))
                 .OrderBy(path => Path.GetFileName(path), StringComparer.Ordinal)
                 .Take(8)
                 .ToArray();
@@ -165,6 +170,47 @@ internal sealed class ModEntry : Mod
             var processingPath = _store.TryClaim(pendingPath);
             if (processingPath is not null)
                 ProcessClaimedRequest(processingPath);
+        }
+    }
+
+    private void ProcessPendingCancellationRequests()
+    {
+        if (_store is null)
+            return;
+
+        IEnumerable<string> pendingFiles;
+        try
+        {
+            pendingFiles = Directory.EnumerateFiles(_store.Paths.Pending, "*.json")
+                .Where(IsCancellationRequest)
+                .OrderBy(path => Path.GetFileName(path), StringComparer.Ordinal)
+                .Take(8)
+                .ToArray();
+        }
+        catch (Exception error)
+        {
+            Monitor.Log($"Failed to scan cancellation actions: {error.Message}", LogLevel.Error);
+            return;
+        }
+
+        foreach (var pendingPath in pendingFiles)
+        {
+            var processingPath = _store.TryClaim(pendingPath);
+            if (processingPath is not null)
+                ProcessClaimedRequest(processingPath);
+        }
+    }
+
+    private static bool IsCancellationRequest(string path)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            return document.RootElement.GetProperty("payload").GetProperty("action").GetString() == "cancel";
+        }
+        catch (Exception)
+        {
+            return false;
         }
     }
 
@@ -189,6 +235,13 @@ internal sealed class ModEntry : Mod
                 throw new JsonException("request envelope is invalid");
 
             var action = ReadString(request.Payload, "action");
+            if (action != "cancel" && !CanProcessWhileActive(action, request.Payload))
+            {
+                WriteActionResult(request.RequestId!, action ?? "unknown", ReadActorId(request.Payload), false, null,
+                    new ErrorDetail { Code = "busy", Message = $"the companion is running {_activeAction?.Action ?? "another action"}" });
+                Archive(processingPath);
+                return;
+            }
             switch (action)
             {
                 case "ping":
@@ -291,7 +344,7 @@ internal sealed class ModEntry : Mod
             Archive(processingPath);
             return;
         }
-        _activeProcessingPath = processingPath;
+        _activeAction = new ActiveAction(request.RequestId!, "move_relative", processingPath, ReadActorId(request.Payload));
     }
 
     private void StartMoveTo(Envelope<JsonElement> request, string processingPath)
@@ -316,16 +369,16 @@ internal sealed class ModEntry : Mod
             Archive(processingPath);
             return;
         }
-        _activeProcessingPath = processingPath;
+        _activeAction = new ActiveAction(request.RequestId!, "move_to", processingPath, ReadActorId(request.Payload));
     }
 
     private void FinishMoveIfReady(MoveCompletion? completion)
     {
-        if (completion is null || _store is null || _activeProcessingPath is null)
+        if (completion is null || _store is null || _activeAction is null)
             return;
         WriteMoveResult(completion);
-        Archive(_activeProcessingPath);
-        _activeProcessingPath = null;
+        Archive(_activeAction.ProcessingPath);
+        _activeAction = null;
     }
 
     private void ExecuteFaceDirection(Envelope<JsonElement> request, string processingPath)
@@ -443,9 +496,15 @@ internal sealed class ModEntry : Mod
         }
         object? data = null;
         ErrorDetail? error = null;
-        var success = _companion is not null && _companion.TryCastFishingRod(out data, out error);
-        WriteActionResult(request.RequestId!, "cast_fishing_rod", actorId, success, data, error);
-        Archive(processingPath);
+        var success = _companion is not null && _companion.TryCastFishingRod(request.RequestId!, out data, out error);
+        if (!success)
+        {
+            WriteActionResult(request.RequestId!, "cast_fishing_rod", actorId, false, data, error);
+            Archive(processingPath);
+            return;
+        }
+
+        _activeAction = new ActiveAction(request.RequestId!, "cast_fishing_rod", processingPath, actorId, data);
     }
 
     private void ExecuteSetAutoCombat(Envelope<JsonElement> request, string processingPath)
@@ -458,7 +517,28 @@ internal sealed class ModEntry : Mod
         }
         ErrorDetail? error = null;
         var success = _companion is not null && _companion.TrySetAutoCombat(payload.Enabled, out error);
-        WriteActionResult(request.RequestId!, "set_auto_combat", actorId, success, new { enabled = payload.Enabled }, error);
+        if (!success)
+        {
+            WriteActionResult(request.RequestId!, "set_auto_combat", actorId, false, new { enabled = payload.Enabled }, error);
+            Archive(processingPath);
+            return;
+        }
+
+        if (!payload.Enabled && _activeAction?.Action == "set_auto_combat")
+        {
+            FinishActiveAction("cancelled", "auto-combat disabled", "auto_combat_disabled");
+            WriteActionResult(request.RequestId!, "set_auto_combat", actorId, true, new { enabled = false }, null);
+            Archive(processingPath);
+            return;
+        }
+
+        if (payload.Enabled)
+        {
+            _activeAction = new ActiveAction(request.RequestId!, "set_auto_combat", processingPath, actorId, new { enabled = true });
+            return;
+        }
+
+        WriteActionResult(request.RequestId!, "set_auto_combat", actorId, true, new { enabled = false }, null);
         Archive(processingPath);
     }
 
@@ -575,10 +655,19 @@ internal sealed class ModEntry : Mod
         ErrorDetail? error = null;
         var success = _companion is not null
             && _companion.TryShowBubble(text, (int)payload.DurationMs, out error);
-        WriteActionResult(request.RequestId!, "bubble", actorId, success, success
-            ? new { text, channel = "bubble", duration_ms = payload.DurationMs }
-            : null, error);
-        Archive(processingPath);
+        if (!success)
+        {
+            WriteActionResult(request.RequestId!, "bubble", actorId, false, null, error);
+            Archive(processingPath);
+            return;
+        }
+
+        _activeAction = new ActiveAction(
+            request.RequestId!,
+            "bubble",
+            processingPath,
+            actorId,
+            new { text, channel = "bubble", duration_ms = payload.DurationMs });
     }
 
     private void ExecuteCancel(Envelope<JsonElement> request, string processingPath)
@@ -589,17 +678,186 @@ internal sealed class ModEntry : Mod
             Archive(processingPath);
             return;
         }
-        if (!string.Equals(_activeProcessingPath is null ? null : Path.GetFileNameWithoutExtension(_activeProcessingPath), payload.TargetRequestId, StringComparison.OrdinalIgnoreCase))
+
+        var targetRequestId = payload.TargetRequestId.Trim();
+        if (string.IsNullOrWhiteSpace(targetRequestId))
         {
-            WriteActionResult(request.RequestId!, "cancel", actorId, false, null, new ErrorDetail { Code = "request_not_active", Message = $"request is not the active movement: {payload.TargetRequestId}" });
+            WriteActionResult(request.RequestId!, "cancel", actorId, false, null, new ErrorDetail { Code = "invalid_target_request", Message = "target_request_id must not be empty" });
             Archive(processingPath);
             return;
         }
 
-        var completion = _moveExecutor?.Cancel("cancelled", "movement cancelled by a new cancel request");
-        FinishMoveIfReady(completion);
-        WriteActionResult(request.RequestId!, "cancel", actorId, true, new { target_request_id = payload.TargetRequestId, cancelled = true }, null);
+        if (_activeAction is not null && string.Equals(_activeAction.RequestId, targetRequestId, StringComparison.OrdinalIgnoreCase))
+        {
+            var targetAction = _activeAction.Action;
+            var cancelled = CancelActiveAction("cancelled_by_request", "action cancelled by a cancel request");
+            if (!cancelled)
+            {
+                WriteActionResult(request.RequestId!, "cancel", actorId, false, null,
+                    new ErrorDetail { Code = "request_not_active", Message = $"request is no longer active: {targetRequestId}" });
+                Archive(processingPath);
+                return;
+            }
+            WriteActionResult(request.RequestId!, "cancel", actorId, true, new
+            {
+                target_request_id = targetRequestId,
+                target_action = targetAction,
+                target_status = "cancelled",
+                cancelled = true
+            }, null);
+            Archive(processingPath);
+            return;
+        }
+
+        if (TryCancelPendingRequest(targetRequestId))
+        {
+            WriteActionResult(request.RequestId!, "cancel", actorId, true, new
+            {
+                target_request_id = targetRequestId,
+                target_status = "cancelled",
+                cancelled = true
+            }, null);
+            Archive(processingPath);
+            return;
+        }
+
+        if (File.Exists(Path.Combine(_store!.Paths.Results, $"{targetRequestId}.json")))
+        {
+            WriteActionResult(request.RequestId!, "cancel", actorId, false, new
+            {
+                target_request_id = targetRequestId,
+                target_status = "completed",
+                cancelled = false
+            }, new ErrorDetail { Code = "request_completed", Message = $"request has already completed: {targetRequestId}" });
+            Archive(processingPath);
+            return;
+        }
+
+        if (File.Exists(Path.Combine(_store.Paths.Processing, $"{targetRequestId}.json")))
+        {
+            WriteActionResult(request.RequestId!, "cancel", actorId, false, null, new ErrorDetail { Code = "request_not_active", Message = $"request is processing but is not cancellable: {targetRequestId}" });
+            Archive(processingPath);
+            return;
+        }
+
+        WriteActionResult(request.RequestId!, "cancel", actorId, false, null, new ErrorDetail { Code = "request_not_found", Message = $"request not found: {targetRequestId}" });
         Archive(processingPath);
+    }
+
+    private bool CanProcessWhileActive(string? action, JsonElement payload)
+    {
+        if (_activeAction is null)
+            return true;
+
+        if (_activeAction.Action == "set_auto_combat"
+            && action == "set_auto_combat"
+            && payload.TryGetProperty("enabled", out var enabled)
+            && enabled.ValueKind == JsonValueKind.False)
+            return true;
+
+        return false;
+    }
+
+    private bool TryCancelPendingRequest(string targetRequestId)
+    {
+        if (_store is null)
+            return false;
+
+        var pendingPath = Path.Combine(_store.Paths.Pending, $"{targetRequestId}.json");
+        if (!File.Exists(pendingPath))
+            return false;
+
+        var processingPath = _store.TryClaim(pendingPath);
+        if (processingPath is null)
+            return false;
+
+        try
+        {
+            var request = JsonSerializer.Deserialize<Envelope<JsonElement>>(File.ReadAllText(processingPath), Protocol.JsonOptions)
+                ?? throw new JsonException("target request is empty");
+            var action = ReadString(request.Payload, "action") ?? "unknown";
+            var actorId = ReadActorId(request.Payload);
+            WriteActionResult(request.RequestId ?? targetRequestId, action, actorId, false, null,
+                new ErrorDetail { Code = "cancelled_before_start", Message = "action cancelled before execution" },
+                "cancelled");
+            Archive(processingPath);
+            return true;
+        }
+        catch (Exception error)
+        {
+            Monitor.Log($"Failed to cancel pending request {targetRequestId}: {error.Message}", LogLevel.Warn);
+            WriteFailure(targetRequestId, "invalid_request", error.Message, null, null);
+            MoveToErrors(processingPath);
+            return true;
+        }
+    }
+
+    private void FinishActionIfReady(ActionCompletion? completion)
+    {
+        if (completion is null || _store is null || _activeAction is null)
+            return;
+        if (!string.Equals(completion.RequestId, _activeAction.RequestId, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        WriteActionResult(
+            completion.RequestId,
+            completion.Action,
+            _activeAction.ActorId,
+            completion.Status == "succeeded",
+            completion.Data,
+            completion.Error,
+            completion.Status);
+        Archive(_activeAction.ProcessingPath);
+        _activeAction = null;
+    }
+
+    private void FinishBubbleIfReady()
+    {
+        if (_activeAction?.Action != "bubble" || _companion?.HasSpeechBubble == true)
+            return;
+
+        FinishActiveAction("succeeded", _activeAction.Data, null);
+    }
+
+    private bool CancelActiveAction(string code, string message)
+    {
+        if (_activeAction is null)
+            return false;
+
+        switch (_activeAction.Action)
+        {
+            case "move_relative":
+            case "move_to":
+                var moveCompletion = _moveExecutor?.Cancel(code, message);
+                FinishMoveIfReady(moveCompletion);
+                return moveCompletion is not null;
+            case "cast_fishing_rod":
+                FinishActionIfReady(_companion?.CancelFishing(code, message));
+                return true;
+            case "bubble":
+                _companion?.ClearSpeechBubble();
+                FinishActiveAction("cancelled", _activeAction.Data, new ErrorDetail { Code = code, Message = message });
+                return true;
+            case "set_auto_combat":
+                ErrorDetail? error = null;
+                if (_companion is not null)
+                    _companion.TrySetAutoCombat(false, out error);
+                FinishActiveAction("cancelled", _activeAction.Data, error ?? new ErrorDetail { Code = code, Message = message });
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private void FinishActiveAction(string status, object? data, ErrorDetail? error)
+    {
+        if (_store is null || _activeAction is null)
+            return;
+
+        var active = _activeAction;
+        WriteActionResult(active.RequestId, active.Action, active.ActorId, status == "succeeded", data, error, status);
+        Archive(active.ProcessingPath);
+        _activeAction = null;
     }
 
     private bool TryValidateActor(Envelope<JsonElement> request, string action, out string actorId)
@@ -652,11 +910,11 @@ internal sealed class ModEntry : Mod
         });
     }
 
-    private void WriteActionResult(string requestId, string action, string actorId, bool success, object? data, ErrorDetail? error)
+    private void WriteActionResult(string requestId, string action, string actorId, bool success, object? data, ErrorDetail? error, string? status = null)
     {
         WriteResult(requestId, new ActionResultPayload
         {
-            Status = success ? "succeeded" : "failed",
+            Status = status ?? (success ? "succeeded" : "failed"),
             Action = action,
             ActorId = actorId,
             Data = data,
@@ -758,6 +1016,24 @@ internal sealed class ModEntry : Mod
             3 => "left",
             _ => "down"
         };
+    }
+
+    private sealed class ActiveAction
+    {
+        public ActiveAction(string requestId, string action, string processingPath, string actorId, object? data = null)
+        {
+            RequestId = requestId;
+            Action = action;
+            ProcessingPath = processingPath;
+            ActorId = actorId;
+            Data = data;
+        }
+
+        public string RequestId { get; }
+        public string Action { get; }
+        public string ProcessingPath { get; }
+        public string ActorId { get; }
+        public object? Data { get; }
     }
 
     private void Archive(string processingPath)

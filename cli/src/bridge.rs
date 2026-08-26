@@ -51,12 +51,31 @@ impl Bridge {
         Ok(())
     }
 
-    pub fn send_and_wait(&self, payload: ActionRequestPayload, timeout_ms: u64) -> Result<Value> {
+    pub fn submit(&self, payload: ActionRequestPayload) -> Result<String> {
         let request_id = Uuid::new_v4().to_string();
         let request = action_request(request_id.clone(), payload);
         let request_path = self.pending.join(format!("{request_id}.json"));
         atomic_write_json(&request_path, &request)?;
-        wait_for_result(&self.results, &request_id, timeout_ms)
+        Ok(request_id)
+    }
+
+    pub fn submit_receipt(&self, payload: ActionRequestPayload) -> Result<Value> {
+        let action = payload.action_name();
+        let request_id = self.submit(payload)?;
+        Ok(json!({
+            "status": "accepted",
+            "action": action,
+            "request_id": request_id,
+        }))
+    }
+
+    pub fn wait(&self, request_id: &str, timeout_ms: u64) -> Result<Value> {
+        wait_for_result(&self.results, request_id, timeout_ms)
+    }
+
+    pub fn send_and_wait(&self, payload: ActionRequestPayload, timeout_ms: u64) -> Result<Value> {
+        let request_id = self.submit(payload)?;
+        self.wait(&request_id, timeout_ms)
     }
 
     pub fn latest_snapshot(&self) -> Result<Option<Envelope<Value>>> {

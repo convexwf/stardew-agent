@@ -31,6 +31,14 @@ internal sealed class CompanionNpc : NPC
         _bubbleTicks = Math.Max(1, (int)Math.Ceiling(durationMs / 1000d * 60d));
     }
 
+    public bool HasSpeechBubble => _bubbleTicks > 0;
+
+    public void ClearSpeechBubble()
+    {
+        _bubbleText = null;
+        _bubbleTicks = 0;
+    }
+
     public void TickSpeechBubble()
     {
         if (_bubbleTicks <= 0)

@@ -32,6 +32,15 @@ internal sealed class MoveExecutor
     }
 }
 
+internal sealed class ActionCompletion
+{
+    public string RequestId { get; init; } = "";
+    public string Action { get; init; } = "";
+    public string Status { get; init; } = "failed";
+    public object? Data { get; init; }
+    public ErrorDetail? Error { get; init; }
+}
+
 internal sealed class MoveCompletion
 {
     public string RequestId { get; init; } = "";

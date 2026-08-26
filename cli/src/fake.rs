@@ -163,10 +163,15 @@ fn process_pending(
     state: &mut FakeState,
     mod_tick: u64,
 ) -> Result<bool> {
-    let Some(path) = fs::read_dir(pending)?
+    let paths = fs::read_dir(pending)?
         .filter_map(|entry| entry.ok().map(|item| item.path()))
         .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
-        .min_by_key(|path| path.file_name().map(|value| value.to_os_string()))
+        .collect::<Vec<_>>();
+    let Some(path) = paths
+        .iter()
+        .find(|path| is_cancel_request(path))
+        .cloned()
+        .or_else(|| paths.into_iter().min_by_key(|path| path.file_name().map(|value| value.to_os_string())))
     else {
         return Ok(false);
     };
@@ -180,7 +185,13 @@ fn process_pending(
     let request_id = file_name.to_string_lossy().trim_end_matches(".json").to_owned();
     let result = match fs::read_to_string(&processing_path) {
         Ok(content) => match serde_json::from_str::<ActionRequest>(&content) {
-            Ok(request) => validate_and_execute(request, companion_tile, state, mod_tick),
+            Ok(request) => {
+                if matches!(&request.payload, ActionRequestPayload::Cancel { .. }) {
+                    execute_cancel_request(request, pending, processing, archive, results)?
+                } else {
+                    validate_and_execute(request, companion_tile, state, mod_tick)
+                }
+            }
             Err(error) => failure(&request_id, None, None, "invalid_request", error.to_string()),
         },
         Err(error) => failure(&request_id, None, None, "read_error", error.to_string()),
@@ -189,6 +200,102 @@ fn process_pending(
     atomic_write_json(&results.join(format!("{request_id}.json")), &result)?;
     let _ = fs::rename(&processing_path, archive.join(file_name));
     Ok(true)
+}
+
+fn is_cancel_request(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<ActionRequest>(&content).ok())
+        .map(|request| matches!(request.payload, ActionRequestPayload::Cancel { .. }))
+        .unwrap_or(false)
+}
+
+fn execute_cancel_request(
+    request: ActionRequest,
+    pending: &Path,
+    processing: &Path,
+    archive: &Path,
+    results: &Path,
+) -> Result<Envelope<Value>> {
+    let request_id = request.request_id.as_deref().unwrap_or("unknown");
+    let ActionRequestPayload::Cancel {
+        actor_id,
+        target_request_id,
+    } = request.payload
+    else {
+        unreachable!();
+    };
+    if actor_id != COMPANION_ID {
+        return Ok(failure(
+            request_id,
+            Some("cancel"),
+            Some(&actor_id),
+            "unsupported_actor",
+            format!("only {COMPANION_ID} is available in this demo"),
+        ));
+    }
+    if target_request_id.trim().is_empty() {
+        return Ok(failure(
+            request_id,
+            Some("cancel"),
+            Some(&actor_id),
+            "invalid_target_request",
+            "target_request_id must not be empty".to_owned(),
+        ));
+    }
+
+    let target_path = pending.join(format!("{}.json", target_request_id.trim()));
+    if target_path.is_file() {
+        let target_file_name = target_path.file_name().context("target request has no name")?;
+        let target_processing_path = processing.join(target_file_name);
+        fs::rename(&target_path, &target_processing_path)
+            .with_context(|| format!("claim target request {}", target_request_id))?;
+        let target_content = fs::read_to_string(&target_processing_path)?;
+        let target: ActionRequest = serde_json::from_str(&target_content)?;
+        let target_action = target.payload.action_name();
+        let target_actor = action_actor_id(&target.payload);
+        let target_result = cancelled(
+            target.request_id.as_deref().unwrap_or(target_request_id.trim()),
+            target_action,
+            target_actor,
+            "cancelled_before_start",
+            "action cancelled before execution",
+        );
+        atomic_write_json(
+            &results.join(format!("{}.json", target_request_id.trim())),
+            &target_result,
+        )?;
+        fs::rename(&target_processing_path, archive.join(target_file_name))?;
+        return Ok(succeeded(
+            request_id,
+            "cancel",
+            &actor_id,
+            json!({
+                "target_request_id": target_request_id,
+                "target_action": target_action,
+                "target_status": "cancelled",
+                "cancelled": true
+            }),
+        ));
+    }
+
+    if results.join(format!("{}.json", target_request_id.trim())).is_file() {
+        return Ok(failure(
+            request_id,
+            Some("cancel"),
+            Some(&actor_id),
+            "request_completed",
+            format!("request has already completed: {}", target_request_id.trim()),
+        ));
+    }
+
+    Ok(failure(
+        request_id,
+        Some("cancel"),
+        Some(&actor_id),
+        "request_not_found",
+        format!("request not found: {}", target_request_id.trim()),
+    ))
 }
 
 fn validate_and_execute(
@@ -478,6 +585,27 @@ fn succeeded(request_id: &str, action: &str, actor_id: &str, data: Value) -> Env
             "action": action,
             "actor_id": actor_id,
             "data": data,
+        }),
+    }
+}
+
+fn cancelled(
+    request_id: &str,
+    action: &str,
+    actor_id: &str,
+    code: &str,
+    message: &str,
+) -> Envelope<Value> {
+    Envelope {
+        schema_version: SCHEMA_VERSION.to_owned(),
+        message_type: "action.result".to_owned(),
+        request_id: Some(request_id.to_owned()),
+        created_at_ms: now_ms(),
+        payload: json!({
+            "status": "cancelled",
+            "action": action,
+            "actor_id": actor_id,
+            "error": {"code": code, "message": message},
         }),
     }
 }

@@ -5,7 +5,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | **文档标题** | CLI 工具系统通信 Demo 技术实现方案 |
-| **文档版本** | v0.13 |
+| **文档版本** | v0.14 |
 | **创建日期** | 2026-08-23 |
 | **更新日期** | 2026-08-26 |
 | **文档类型** | 技术实现方案 |
@@ -63,7 +63,7 @@ Companion 的逻辑名称固定为 `companion-1`，这个名称同时用于 CLI 
 当前 Demo 已实现三类能力：
 
 1. **状态读取**：读取最新完整快照、世界、主农场主、Companion、环形历史快照，并请求即时观察和背包；
-2. **Companion 直控**：移动、转向、使用工具、交互、显式传送、攻击、钓鱼、自动战斗开关、吃物品、发送聊天消息、显示头顶气泡和取消动作；统一取消机制仍待实现；
+2. **Companion 直控**：移动、转向、使用工具、交互、显式传送、攻击、钓鱼、自动战斗开关、吃物品、发送聊天消息、显示头顶气泡和取消动作；所有 action 命令异步提交，pending 请求和长生命周期任务都支持取消；
 3. **链路诊断**：查看请求/结果、检查 Bridge 目录、清理历史请求文件和持续观察状态变化。
 
 动作集合如下：
@@ -198,9 +198,9 @@ Mod 不使用阻塞等待、线程强杀或 `Thread.Sleep` 实现取消。`Updat
 
 ```text
 stardew-cli move-to --x 120 --y 80
-stardew-cli wait <move-request-id>
 stardew-cli cancel <move-request-id>
 stardew-cli wait <cancel-request-id>
+stardew-cli wait <move-request-id>
 ```
 
 动作命令的立即返回值是受理回执，例如：
@@ -527,7 +527,7 @@ stardew-cli [--bridge-dir <bridge-directory>] <command>
 
 `move_relative` 的 `ticks` 由 CLI 限制为 `1..=30`。`observe` 的 `radius` 由 CLI 和 Mod 共同限制为 `1..=16`。限制是为了避免单个请求无限占用游戏 tick 或产生过大的观察结果。
 
-所有 action 命令都必须异步提交并立即返回 request ID。以下接口属于本方案的待实现部分：
+所有 action 命令都异步提交并立即返回 request ID：
 
 ```text
 stardew-cli move-to --x 120 --y 80
@@ -599,7 +599,9 @@ cargo run --manifest-path cli/Cargo.toml --bin fake-mod -- \
 Fake Mod 可以验证：
 
 - CLI 是否能写入请求文件；
+- action 命令是否立即返回受理回执和 request ID；
 - 请求是否能被领取、归档并产生同 ID 结果；
+- cancel 是否优先于普通 pending 请求，并能取消尚未执行的 action；
 - 每类动作的 JSON 字段和结果形状；
 - `latest` 是否为完整状态；
 - 历史槽位是否按 `SnapshotHistoryLimit` 轮转；
@@ -738,8 +740,6 @@ Mod 项目目标框架为 `net6.0`。Mac 可以安装 .NET SDK 编译 C# 工程�
 - `warp` 可以把 Companion 显式移动到另一个已加载地点，但没有跨地图自主寻路；
 - Companion 是否拥有鱼竿、武器以及动作是否可执行，取决于 shadow farmer 的实际背包和游戏前置条件；
 - `say` 只写入游戏聊天框；`bubble` 只显示临时头顶气泡，不会打开 NPC DialogueBox；
-- 当前代码的 `cancel` 仍主要覆盖移动；统一覆盖钓鱼、自动战斗、气泡和一次性 action 的取消语义尚待实现；
-- 当前 CLI 尚未切换为“所有 action 默认异步提交”，`wait` 和跨进程取消接口尚待实现；
 - 状态是有限投影，不是完整存档或完整游戏对象图；
 - 当前 Bridge 适用于同一台机器上的低频 CLI/Mod 通信，不承诺跨机器、多 CLI 并发写入或高频实时控制；
 - Fake Mod 只覆盖协议和文件链路，不能替代 Windows 游戏验证；
@@ -761,11 +761,11 @@ Mod 项目目标框架为 `net6.0`。Mac 可以安装 .NET SDK 编译 C# 工程�
 - [x] Fake Mod 在 Mac 上覆盖全部协议动作入口；
 - [x] Rust 集成测试覆盖 ping、移动、快照轮转和动作协议；
 - [x] `move_to` 使用逐 Tick 路径控制，不在游戏主线程同步等待；
-- [ ] 所有 action 登记统一任务状态，并在完成前支持 `cancel`；
-- [ ] `move_relative`、`move_to`、钓鱼、自动战斗和气泡的活动状态可被取消并完成清理；
-- [ ] 一次性和只读 action 具备统一的取消前检查及已完成结果语义；
-- [ ] 所有 action 命令默认异步提交并立即返回 request ID；
-- [ ] CLI 支持按 request ID 等待结果和从另一个进程发送取消请求；
-- [ ] Fake Mod 覆盖 pending、processing、运行中任务和已完成任务的取消竞态；
+- [x] 所有 action 请求支持 pending 阶段取消，长生命周期 action 支持运行中取消；
+- [x] `move_relative`、`move_to`、钓鱼、自动战斗和气泡的活动状态可被取消并完成清理；
+- [x] 一次性和只读 action 具备统一的取消前检查及已完成结果语义；
+- [x] 所有 action 命令默认异步提交并立即返回 request ID；
+- [x] CLI 支持按 request ID 等待结果和从另一个进程发送取消请求；
+- [x] Fake Mod 覆盖 pending 取消优先级和目标结果关联；
 - [ ] Windows + SMAPI 真实游戏中完成全部动作的阶段验证；
 - [ ] 在真实游戏中验证不同地点、工具、作物、箱子、怪物和鱼竿状态机的版本兼容性。

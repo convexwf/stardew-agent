@@ -24,6 +24,7 @@ internal sealed class CompanionController
     private ActiveMove? _activeMove;
     private bool _autoCombat;
     private bool _fishingActive;
+    private string? _fishingRequestId;
     private int _autoCombatCooldown;
 
     public CompanionController(IModHelper helper, IMonitor monitor)
@@ -34,9 +35,16 @@ internal sealed class CompanionController
 
     public bool IsSpawned => _visual is not null && _shadow is not null;
 
-    public bool IsBusy => _activeMove is not null;
+    public bool IsBusy => _activeMove is not null || _fishingActive || _autoCombat || HasSpeechBubble;
 
-    public string? CurrentAction => _activeMove?.Action ?? (_fishingActive ? "cast_fishing_rod" : null);
+    public bool IsFishingActive => _fishingActive;
+
+    public bool HasSpeechBubble => _visual?.HasSpeechBubble == true;
+
+    public string? CurrentAction => _activeMove?.Action
+        ?? (_fishingActive ? "cast_fishing_rod" : null)
+        ?? (_autoCombat ? "set_auto_combat" : null)
+        ?? (HasSpeechBubble ? "bubble" : null);
 
     public bool AutoCombat => _autoCombat;
 
@@ -110,7 +118,6 @@ internal sealed class CompanionController
 
         SyncShadow();
         _visual.TickSpeechBubble();
-        TickFishing();
         TickAutoCombat();
 
         if (_activeMove is null)
@@ -188,6 +195,79 @@ internal sealed class CompanionController
         _activeMove = null;
         _visual.controller = null;
         return MoveCompletion.Failed(active.RequestId, active.Action, active.Direction, active.Ticks, code, message, "cancelled");
+    }
+
+    public ActionCompletion? TickFishingAction()
+    {
+        if (!_fishingActive || _shadow is null || Game1.currentGameTime is null || _fishingRequestId is null)
+            return null;
+
+        var requestId = _fishingRequestId;
+        var rod = _shadow.Items.FirstOrDefault(item => item is FishingRod) as FishingRod;
+        if (rod is null)
+        {
+            _fishingActive = false;
+            _fishingRequestId = null;
+            return new ActionCompletion
+            {
+                RequestId = requestId,
+                Action = "cast_fishing_rod",
+                Status = "failed",
+                Error = new ErrorDetail { Code = "no_fishing_rod", Message = "the companion has no fishing rod" }
+            };
+        }
+
+        try
+        {
+            rod.tickUpdate(Game1.currentGameTime, _shadow);
+            if (!rod.isNibbling || rod.isReeling || rod.hit || rod.pullingOutOfWater)
+                return null;
+
+            rod.DoFunction(_shadow.currentLocation, 1, 1, 1, _shadow);
+            _fishingActive = false;
+            _fishingRequestId = null;
+            return new ActionCompletion
+            {
+                RequestId = requestId,
+                Action = "cast_fishing_rod",
+                Status = "succeeded",
+                Data = new { cast = true, completed = true }
+            };
+        }
+        catch (Exception exception)
+        {
+            _fishingActive = false;
+            _fishingRequestId = null;
+            return new ActionCompletion
+            {
+                RequestId = requestId,
+                Action = "cast_fishing_rod",
+                Status = "failed",
+                Error = new ErrorDetail { Code = "fishing_failed", Message = exception.Message }
+            };
+        }
+    }
+
+    public ActionCompletion? CancelFishing(string code, string message)
+    {
+        if (!_fishingActive || _fishingRequestId is null)
+            return null;
+
+        var requestId = _fishingRequestId;
+        _fishingActive = false;
+        _fishingRequestId = null;
+        return new ActionCompletion
+        {
+            RequestId = requestId,
+            Action = "cast_fishing_rod",
+            Status = "cancelled",
+            Error = new ErrorDetail { Code = code, Message = message }
+        };
+    }
+
+    public void ClearSpeechBubble()
+    {
+        _visual?.ClearSpeechBubble();
     }
 
     public bool TryFaceDirection(string direction, out ErrorDetail? error)
@@ -404,7 +484,7 @@ internal sealed class CompanionController
         }
     }
 
-    public bool TryCastFishingRod(out object? data, out ErrorDetail? error)
+    public bool TryCastFishingRod(string requestId, out object? data, out ErrorDetail? error)
     {
         data = null;
         error = null;
@@ -425,6 +505,7 @@ internal sealed class CompanionController
             rod.beginUsing(_shadow.currentLocation, (int)_shadow.Position.X, (int)_shadow.Position.Y, _shadow);
             rod.castingPower = 1f;
             _fishingActive = true;
+            _fishingRequestId = requestId;
             data = new { cast = true };
             return true;
         }
@@ -545,7 +626,7 @@ internal sealed class CompanionController
             InventoryCount = inventory.Count,
             Inventory = inventory,
             Mode = "direct",
-            Status = IsBusy ? "moving" : _fishingActive ? "fishing" : _autoCombat ? "auto-combat" : "idle",
+            Status = _activeMove is not null ? "moving" : _fishingActive ? "fishing" : _autoCombat ? "auto-combat" : HasSpeechBubble ? "bubble" : "idle",
             CurrentAction = CurrentAction,
             WorldReady = Context.IsWorldReady && IsSpawned,
             Busy = IsBusy,
@@ -567,16 +648,19 @@ internal sealed class CompanionController
     {
         _shadow?.WakeUp();
         _fishingActive = false;
+        _fishingRequestId = null;
     }
 
     public void Cleanup()
     {
         CancelMove();
+        _visual?.ClearSpeechBubble();
         if (_visual is not null)
             _visual.currentLocation?.characters.Remove(_visual);
         _visual = null;
         _shadow = null;
         _fishingActive = false;
+        _fishingRequestId = null;
         _autoCombat = false;
         _autoCombatCooldown = 0;
     }
@@ -703,31 +787,6 @@ internal sealed class CompanionController
         }
         TryAttack(out _, out _);
         _autoCombatCooldown = 15;
-    }
-
-    private void TickFishing()
-    {
-        if (!_fishingActive || _shadow is null || Game1.currentGameTime is null)
-            return;
-        var rod = _shadow.Items.FirstOrDefault(item => item is FishingRod) as FishingRod;
-        if (rod is null)
-        {
-            _fishingActive = false;
-            return;
-        }
-        try
-        {
-            rod.tickUpdate(Game1.currentGameTime, _shadow);
-            if (rod.isNibbling && !rod.isReeling && !rod.hit && !rod.pullingOutOfWater)
-            {
-                rod.DoFunction(_shadow.currentLocation, 1, 1, 1, _shadow);
-                _fishingActive = false;
-            }
-        }
-        catch
-        {
-            _fishingActive = false;
-        }
     }
 
     private void CancelMove()

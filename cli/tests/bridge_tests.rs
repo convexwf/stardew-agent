@@ -448,8 +448,60 @@ fn cli_writes_actions_through_fake_mod() {
         let mut child = child;
         assert!(output.status.success(), "CLI stderr: {}", String::from_utf8_lossy(&output.stderr));
         assert!(child.wait().unwrap().success());
-        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(receipt["status"], "accepted");
+        assert_eq!(receipt["action"], action_name);
+        let request_id = receipt["request_id"].as_str().unwrap();
+        let wait_output = Command::new(env!("CARGO_BIN_EXE_stardew-cli"))
+            .arg("--bridge-dir")
+            .arg(&bridge.root)
+            .arg("wait")
+            .arg(request_id)
+            .output()
+            .unwrap();
+        assert!(
+            wait_output.status.success(),
+            "wait stderr: {}",
+            String::from_utf8_lossy(&wait_output.stderr)
+        );
+        let result: serde_json::Value = serde_json::from_slice(&wait_output.stdout).unwrap();
         assert_eq!(result["payload"]["action"], action_name);
         fs::remove_dir_all(bridge.root).unwrap();
     }
+}
+
+#[test]
+fn fake_mod_prioritizes_cancel_and_cancels_pending_action() {
+    let _lock = fake_mod_lock();
+    let bridge = temp_bridge();
+    bridge.ensure_layout().unwrap();
+    let target_request_id = bridge
+        .submit(ActionRequestPayload::MoveTo {
+            actor_id: COMPANION_ID.to_owned(),
+            x: 120,
+            y: 80,
+        })
+        .unwrap();
+    let cancel_request_id = bridge
+        .submit(ActionRequestPayload::Cancel {
+            actor_id: COMPANION_ID.to_owned(),
+            target_request_id: target_request_id.clone(),
+        })
+        .unwrap();
+
+    let child = Command::new(env!("CARGO_BIN_EXE_fake-mod"))
+        .arg("--bridge-dir")
+        .arg(&bridge.root)
+        .arg("--once")
+        .spawn()
+        .unwrap();
+    let mut child = child;
+    assert!(child.wait().unwrap().success());
+
+    let target_result = bridge.wait(&target_request_id, 2_000).unwrap();
+    let cancel_result = bridge.wait(&cancel_request_id, 2_000).unwrap();
+    assert_eq!(target_result["payload"]["status"], "cancelled");
+    assert_eq!(cancel_result["payload"]["status"], "succeeded");
+    assert_eq!(cancel_result["payload"]["data"]["cancelled"], true);
+    fs::remove_dir_all(bridge.root).unwrap();
 }

@@ -130,6 +130,29 @@ impl ToolKind {
 
 pub type ActionRequest = Envelope<ActionRequestPayload>;
 
+impl ActionRequestPayload {
+    pub fn action_name(&self) -> &'static str {
+        match self {
+            Self::Ping { .. } => "ping",
+            Self::MoveRelative { .. } => "move_relative",
+            Self::MoveTo { .. } => "move_to",
+            Self::FaceDirection { .. } => "face_direction",
+            Self::UseTool { .. } => "use_tool",
+            Self::Interact { .. } => "interact",
+            Self::WarpTo { .. } => "warp_to",
+            Self::Observe { .. } => "observe",
+            Self::GetInventory { .. } => "get_inventory",
+            Self::Attack { .. } => "attack",
+            Self::CastFishingRod { .. } => "cast_fishing_rod",
+            Self::SetAutoCombat { .. } => "set_auto_combat",
+            Self::EatItem { .. } => "eat_item",
+            Self::Say { .. } => "say",
+            Self::Bubble { .. } => "bubble",
+            Self::Cancel { .. } => "cancel",
+        }
+    }
+}
+
 pub fn action_request(request_id: String, payload: ActionRequestPayload) -> ActionRequest {
     Envelope {
         schema_version: SCHEMA_VERSION.to_owned(),
