@@ -5,7 +5,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | **文档标题** | CLI 工具系统通信 Demo 技术实现方案 |
-| **文档版本** | v0.17 |
+| **文档版本** | v0.18 |
 | **创建日期** | 2026-08-23 |
 | **更新日期** | 2026-08-27 |
 | **文档类型** | 技术实现方案 |
@@ -15,6 +15,8 @@
 
 - [文档定位](#文档定位)
 - [当前实现范围](#当前实现范围)
+- [命令同步异步语义](#命令同步异步语义)
+- [工具与 Shadow Farmer 背包](#工具与-shadow-farmer-背包)
 - [工具动作表现方案](#工具动作表现方案)
 - [Follow 设计与实现](#follow-设计与实现)
 - [数据交互链路](#数据交互链路)
@@ -65,30 +67,85 @@ Companion 的逻辑名称固定为 `companion-1`，这个名称同时用于 CLI 
 当前 Demo 已实现三类能力：
 
 1. **状态读取**：读取最新完整快照、世界、主农场主、Companion、环形历史快照，并请求即时观察和背包；
-2. **Companion 直控**：移动、转向、使用工具、交互、显式传送、攻击、钓鱼、自动战斗开关、吃物品、发送聊天消息、显示头顶气泡和取消动作；所有 action 命令异步提交，pending 请求和长生命周期任务都支持取消；
+2. **Companion 直控**：移动、转向、使用工具、交互、显式传送、攻击、钓鱼、自动战斗开关、吃物品、发送聊天消息、显示头顶气泡和取消动作；游戏操作命令异步提交，信息命令同步返回，pending 请求和长生命周期任务都支持取消；
 3. **链路诊断**：查看请求/结果、检查 Bridge 目录、清理历史请求文件和持续观察状态变化。
 
 动作集合如下：
 
-| 类别 | 动作 | 是否改变游戏状态 |
-| --- | --- | --- |
-| 连通性 | `ping` | 否；验证 CLI → Mod → CLI |
-| 移动 | `move_relative`、`move_to` | 是；改变 Companion 的游戏内位置或移动任务；移动过程必须可取消 |
-| 跟随 | `follow` | 是；在 Mod 内持续跟随主农场主，同地图寻路并在跨地图时自动 warp；任务必须可取消 |
-| 姿态 | `face_direction` | 是；改变 Companion 朝向 |
-| 工具与交互 | `use_tool`、`interact` | 是；由游戏 API 决定是否成功 |
-| 地图 | `warp_to` | 是；显式把 Companion 移到指定地点和 tile |
-| 战斗 | `attack`、`set_auto_combat` | 是；攻击一次或开启/关闭实时自动攻击 |
-| 钓鱼 | `cast_fishing_rod` | 是；启动鱼竿状态机 |
-| 物品 | `get_inventory`、`eat_item` | 背包读取；吃物品会改变体力、生命和堆叠数量 |
-| 说话 | `say` | 是；在游戏聊天框中显示 Companion 消息；消息提交前可取消 |
-| 气泡 | `bubble` | 是；在 Companion 头顶显示限定时长的文字气泡，显示期间可取消 |
-| 观察 | `observe` | 否；读取 Companion 周围 tile、对象、NPC 和怪物 |
-| 控制 | `cancel` | 取消任意尚未完成的 action；不回滚已经完成的游戏副作用 |
+| 类别 | 动作 | 是否改变游戏状态 | CLI 调用语义 |
+| --- | --- | --- | --- |
+| 连通性 | `ping` | 否；验证 CLI → Mod → CLI | 同步等待结果 |
+| 移动 | `move_relative`、`move_to` | 是；改变 Companion 的游戏内位置或移动任务；移动过程必须可取消 | 异步返回 request ID |
+| 跟随 | `follow` | 是；在 Mod 内持续跟随主农场主，同地图寻路并在跨地图时自动 warp；任务必须可取消 | 异步返回 request ID |
+| 姿态 | `face_direction` | 是；改变 Companion 朝向 | 异步返回 request ID |
+| 工具与交互 | `use_tool`、`interact` | 是；由游戏 API 决定是否成功 | 异步返回 request ID |
+| 地图 | `warp_to` | 是；显式把 Companion 移到指定地点和 tile | 异步返回 request ID |
+| 战斗 | `attack`、`set_auto_combat` | 是；攻击一次或开启/关闭实时自动攻击 | 异步返回 request ID |
+| 钓鱼 | `cast_fishing_rod` | 是；启动鱼竿状态机 | 异步返回 request ID |
+| 物品 | `get_inventory`、`eat_item` | 读取背包；吃物品会改变体力、生命和堆叠数量 | `get_inventory` 同步等待结果；`eat_item` 异步返回 request ID |
+| 说话 | `say` | 是；在游戏聊天框中显示 Companion 消息 | 异步返回 request ID |
+| 气泡 | `bubble` | 是；在 Companion 头顶显示限定时长的文字气泡，显示期间可取消 | 异步返回 request ID |
+| 观察 | `observe` | 否；读取 Companion 周围 tile、对象、NPC 和怪物 | 同步等待结果 |
+| 控制 | `cancel` | 取消任意尚未完成的 action；不回滚已经完成的游戏副作用 | 异步提交取消请求，并单独查询目标结果 |
 
-`use_tool`、`attack` 和 `cast_fishing_rod` 的命令入口已经实现，但实际是否成功取决于 Companion shadow farmer 当前是否拥有相应工具、目标是否存在以及游戏运行时前置条件。失败会通过结构化 `error` 返回，不会伪造成功。
+`use_tool`、`attack` 和 `cast_fishing_rod` 的命令入口已经实现，但实际是否成功取决于 Companion Shadow Farmer 当前是否拥有相应工具、目标是否存在以及游戏运行时前置条件。失败会通过结构化 `error` 返回，不会伪造成功。
 
 工具动作的游戏效果已经实现，工具挥动和命中特效按照下面的[工具动作表现方案](#工具动作表现方案)补充；在该方案完成前，当前版本可能出现游戏对象已经改变但可见 Companion 没有对应工具动画的情况。
+
+## 命令同步异步语义
+
+同步或异步描述的是 CLI 的调用体验，不改变 Bridge 协议。所有需要进入游戏运行时的请求仍使用统一的 `action.request` 和 `action.result` Envelope；区别在于 CLI 是否在提交请求后自动等待结果。
+
+信息类命令只读取快照、Bridge 文件或游戏当前状态，不持续改变 Companion，因此 CLI 应提交请求并等待终态后直接输出结果。包括 `ping`、`observe`、`inventory`，以及直接读取文件的 `status`、`world`、`player`、`companion`、`snapshot list`、`snapshot read`、`request show`、`result show` 和 `doctor`。`watch` 是持续输出状态变化的流式命令，不属于一次性同步命令；`wait` 是通用结果等待命令。
+
+涉及游戏操作的命令保持异步：CLI 写入请求后立即返回受理回执和 `request_id`，由调用方使用 `wait` 查询终态，必要时使用 `cancel` 发出取消请求。包括移动、跟随、转向、工具、交互、warp、攻击、钓鱼、自动战斗、吃物品、聊天和气泡。即使某些操作通常在一个游戏 Tick 内完成，也保留相同的异步入口，以便协议语义统一，并为操作前置检查、游戏 Tick 调度和取消保留边界。
+
+信息请求在协议层仍可能经历 `pending`、`processing` 和 `result` 文件阶段；“同步”不表示 CLI 绕过 Mod 直接读取内存，也不表示游戏主线程被 CLI 阻塞。CLI 只是在合理超时内轮询对应结果。超时只表示 CLI 停止等待，请求本身仍可能继续执行；调用方可以用 `result show` 查询，或对尚未完成的操作使用 `cancel`。
+
+当前协议和 Bridge 已经支持统一的等待能力；CLI 将信息类实时请求改为自动等待属于调用层行为，不需要为同步查询增加另一套通信协议。
+
+本节记录的是确定的 CLI 调用约定。当前代码仍有部分实时信息命令复用统一的受理回执路径；在 CLI 调用层完成同步等待改造前，可以使用返回的 `request_id` 配合 `wait` 获取 `ping`、`observe` 和 `inventory` 的结果。该实现状态不会改变信息请求在协议层的只读性质。
+
+## 工具与 Shadow Farmer 背包
+
+### 两个对象的职责
+
+Companion 由可见的 `CompanionNpc` 和隐藏的 `BotFarmer` 组成。可见 NPC 负责位置、朝向、寻路和画面表现；Shadow Farmer 持有物品，并作为工具、战斗、钓鱼、吃物品及部分交互 API 的调用主体。工具动作不是把工具“装备”到可见 NPC 上，而是从 Shadow Farmer 的 `Items` 中找到对应对象后调用 Stardew Valley 游戏 API。
+
+### 当前背包初始化
+
+当前 Shadow Farmer 背包不是 `config.json` 配置，也不是玩家存档中的独立 Farmhand 背包。每次 Companion 创建时，Mod 在 `CompanionController.EnsureSpawned()` 中创建一个运行时 `BotFarmer`：
+
+1. 背包容量固定为 `36` 格；
+2. 使用游戏的 `Farmer.initialTools()` 加入默认初始工具；
+3. 剩余槽位填充为空值；
+4. Mod 当前没有从配置、存档或箱子转移物品到这个背包的通用流程。
+
+因此，`Farmer.initialTools()` 是当前唯一的初始工具来源；项目代码没有在初始化阶段显式添加剑、鱼竿或其他额外物品。Shadow Farmer 是 Mod 运行时对象，当前没有独立的存档持久化逻辑；返回标题并重新创建 Companion 后，背包会按上述规则重新初始化。
+
+### 背包读取和修改边界
+
+`inventory` 是信息类 CLI 命令，对应协议动作 `get_inventory`。它读取 Shadow Farmer 当前 `Items`，结果中的每个物品包含槽位、名称、 qualified item ID、堆叠数量、类型和可食用性等字段。`companion` 和 `status` 的最新快照中也会包含当前背包投影，但快照只在 latest 写出周期到达时更新，不等价于即时读取。
+
+当前 Demo 只有有限的背包修改路径：`eat_item` 会消耗可食用物品并改变 Shadow Farmer 的体力、生命和堆叠数量；`interact` 对箱子只读取并返回箱内物品，不会自动把物品转入背包。当前没有通用的添加、移除、转移、装备或整理背包命令，也没有背包配置项。
+
+### 当前支持的工具
+
+当前 `use_tool` 通过 Shadow Farmer 背包中的工具类型查找并调用游戏 API，支持以下入口：
+
+| CLI 工具参数 | 对应游戏类型 | 背包要求 | 说明 |
+| --- | --- | --- | --- |
+| `hoe` | `Hoe` | 背包中有锄头 | 对目标 tile 执行锄头逻辑 |
+| `pickaxe` | `Pickaxe` | 背包中有镐 | 对目标 tile 执行镐逻辑 |
+| `axe` | `Axe` | 背包中有斧头 | 对目标 tile 执行斧头逻辑 |
+| `watering_can` | `WateringCan` | 背包中有浇水壶 | 对目标 tile 执行浇水逻辑 |
+| `sword`、`weapon` | `MeleeWeapon` | 背包中有近战武器 | 对目标 tile 执行近战伤害逻辑 |
+
+鱼竿不通过 `use_tool` 选择，而由独立的 `cast_fishing_rod` 动作查找 `FishingRod`。`attack` 同样查找 Shadow Farmer 背包中的第一个 `MeleeWeapon`，没有武器时返回 `no_attack_target`；没有鱼竿时 `cast_fishing_rod` 返回 `no_fishing_rod`。
+
+上述是当前 Demo 支持的工具入口，不是 Stardew Valley 全部原生工具的完整清单。当前没有为镰刀、奶桶、剪刀、淘金盘、弹弓、魔杖等其他原生工具提供 `use_tool` 参数映射；它们即使出现在背包中，也不能通过当前 CLI 工具命令自动调用。
+
+工具命令的结果表示游戏 API 调用是否成功，不表示可见 Companion 已完成完整原版动画。工具表现由独立的 `ActionPresentation` 负责，当前方案使用无新增素材的近似挥动、水流、命中和抛竿效果；实际游戏副作用仍由 Shadow Farmer 和游戏 API 决定。
 
 ## 工具动作表现方案
 
@@ -354,7 +411,7 @@ Mod 不使用阻塞等待、线程强杀或 `Thread.Sleep` 实现取消。`Updat
 
 ### CLI 等待与取消
 
-所有提交 action 的 CLI 命令都采用异步语义：命令只负责生成并写入请求，成功写入后立即输出请求受理结果和 `request_id`，不等待 Mod 执行动作。需要等待终态时使用独立的 `wait` 命令；需要取消时使用独立的 `cancel` 命令。典型调用链是：
+涉及游戏操作的 CLI 命令采用异步语义：命令只负责生成并写入请求，成功写入后立即输出请求受理结果和 `request_id`，不等待 Mod 执行动作。需要等待终态时使用独立的 `wait` 命令；需要取消时使用独立的 `cancel` 命令。典型调用链是：
 
 ```text
 stardew-cli move-to --x 120 --y 80
@@ -639,49 +696,49 @@ snapshot-0.json → snapshot-1.json → snapshot-2.json
 stardew-cli [--bridge-dir <bridge-directory>] <command>
 ```
 
-也可以设置 `STARDEW_BRIDGE_DIR`，省略全局参数。没有参数或环境变量时，CLI 使用自身可执行文件所在目录下的 `bridge/`。输出统一为 JSON；提交 action 的命令只输出受理回执，最终动作结果由 `wait` 或 `result show` 获取。
+也可以设置 `STARDEW_BRIDGE_DIR`，省略全局参数。没有参数或环境变量时，CLI 使用自身可执行文件所在目录下的 `bridge/`。输出统一为 JSON。信息类命令会自动等待实时请求结果或直接读取本地状态；游戏操作命令只输出受理回执，最终动作结果由 `wait` 或 `result show` 获取。
 
 ### 状态、观察和诊断
 
-| 命令 | 作用 |
-| --- | --- |
-| `status` | 打印完整 `snapshot-latest.json` |
-| `world` | 只打印快照中的 `game` |
-| `player` | 只打印快照中的 `player` |
-| `companion --actor-id companion-1` | 只打印指定 Companion 状态 |
-| `inventory [--actor-id ...]` | 发请求读取实时背包 |
-| `observe [--actor-id ...] [--radius 8]` | 发请求读取局部环境 |
-| `snapshot list` | 按序号列出历史槽位 |
-| `snapshot read <index>` | 读取一个固定历史槽位 |
-| `request show <request-id>` | 查找请求及其所在目录 |
-| `result show <request-id>` | 读取已写入的结果 |
-| `wait <request-id>` | 等待并打印指定 request 的终态结果 |
-| `doctor` | 检查目录、latest、历史数量和临时文件 |
-| `cleanup --dry-run` | 预览结果、归档和错误文件清理范围 |
-| `cleanup` | 删除超过保留时长的结果、归档和错误 JSON |
-| `watch` | 按 `latest_write_sequence` 变化持续打印快照 |
+| 命令 | 作用 | CLI 语义 |
+| --- | --- | --- |
+| `status` | 打印完整 `snapshot-latest.json` | 同步读取本地快照 |
+| `world` | 只打印快照中的 `game` | 同步读取本地快照 |
+| `player` | 只打印快照中的 `player` | 同步读取本地快照 |
+| `companion --actor-id companion-1` | 只打印指定 Companion 状态 | 同步读取本地快照 |
+| `inventory [--actor-id ...]` | 发请求读取实时背包 | 同步提交并等待结果 |
+| `observe [--actor-id ...] [--radius 8]` | 发请求读取局部环境 | 同步提交并等待结果 |
+| `snapshot list` | 按序号列出历史槽位 | 同步读取本地文件 |
+| `snapshot read <index>` | 读取一个固定历史槽位 | 同步读取本地文件 |
+| `request show <request-id>` | 查找请求及其所在目录 | 同步读取本地文件 |
+| `result show <request-id>` | 读取已写入的结果 | 同步读取本地文件 |
+| `wait <request-id>` | 等待并打印指定 request 的终态结果 | 阻塞等待，不创建游戏动作 |
+| `doctor` | 检查目录、latest、历史数量和临时文件 | 同步读取本地文件 |
+| `cleanup --dry-run` | 预览结果、归档和错误文件清理范围 | 同步执行本地清理检查 |
+| `cleanup` | 删除超过保留时长的结果、归档和错误 JSON | 同步执行本地文件操作 |
+| `watch` | 按 `latest_write_sequence` 变化持续打印快照 | 持续读取的流式命令 |
 
 `cleanup` 不会触碰 `snapshots/`，也不会删除 `pending` 或 `processing` 中的请求。执行前可以先使用 `--dry-run`。
 
 ### Companion 动作
 
-| CLI 命令 | 请求动作 | 示例 |
-| --- | --- | --- |
-| `ping` | `ping` | `ping` |
-| `move <direction> --ticks <n>` | `move_relative` | `move right --ticks 15` |
-| `move-to --x <x> --y <y>` | `move_to` | `move-to --x 72 --y 18` |
-| `follow [--distance <tiles>]` | `follow` | `follow --distance 2` |
-| `face <direction>` | `face_direction` | `face left` |
-| `use-tool <tool> --x <x> --y <y>` | `use_tool` | `use-tool hoe --x 72 --y 18` |
-| `interact --x <x> --y <y>` | `interact` | `interact --x 72 --y 18` |
-| `warp --location <name> --x <x> --y <y>` | `warp_to` | `warp --location Mine --x 6 --y 6` |
-| `attack` | `attack` | `attack` |
-| `cast-fishing-rod` | `cast_fishing_rod` | `cast-fishing-rod` |
-| `set-auto-combat --enabled <bool>` | `set_auto_combat` | `set-auto-combat --enabled true` |
-| `eat-item [--slot <n>]` | `eat_item` | `eat-item --slot 4` |
-| `say <text>`（别名 `chat`） | `say` | `say "我已经开始工作了"` |
-| `bubble <text> [--duration-ms <ms>]` | `bubble` | `bubble "我在这里" --duration-ms 3000` |
-| `cancel <request-id>` | `cancel`；可指向任意尚未完成的 action | `cancel 0c6c7d24-...` |
+| CLI 命令 | 请求动作 | 示例 | CLI 语义 |
+| --- | --- | --- | --- |
+| `ping` | `ping` | `ping` | 同步提交并等待结果 |
+| `move <direction> --ticks <n>` | `move_relative` | `move right --ticks 15` | 异步返回 request ID |
+| `move-to --x <x> --y <y>` | `move_to` | `move-to --x 72 --y 18` | 异步返回 request ID |
+| `follow [--distance <tiles>]` | `follow` | `follow --distance 2` | 异步返回 request ID |
+| `face <direction>` | `face_direction` | `face left` | 异步返回 request ID |
+| `use-tool <tool> --x <x> --y <y>` | `use_tool` | `use-tool hoe --x 72 --y 18` | 异步返回 request ID |
+| `interact --x <x> --y <y>` | `interact` | `interact --x 72 --y 18` | 异步返回 request ID |
+| `warp --location <name> --x <x> --y <y>` | `warp_to` | `warp --location Mine --x 6 --y 6` | 异步返回 request ID |
+| `attack` | `attack` | `attack` | 异步返回 request ID |
+| `cast-fishing-rod` | `cast_fishing_rod` | `cast-fishing-rod` | 异步返回 request ID |
+| `set-auto-combat --enabled <bool>` | `set_auto_combat` | `set-auto-combat --enabled true` | 异步返回 request ID |
+| `eat-item [--slot <n>]` | `eat_item` | `eat-item --slot 4` | 异步返回 request ID |
+| `say <text>`（别名 `chat`） | `say` | `say "我已经开始工作了"` | 异步返回 request ID |
+| `bubble <text> [--duration-ms <ms>]` | `bubble` | `bubble "我在这里" --duration-ms 3000` | 异步返回 request ID |
+| `cancel <request-id>` | `cancel`；可指向任意尚未完成的 action | `cancel 0c6c7d24-...` | 异步提交控制请求 |
 
 写命令当前固定控制 `companion-1`；读命令可以通过 `--actor-id` 指定协议中的 actor 字段，但 Mod Demo 目前只接受这个唯一 ID。
 
@@ -691,7 +748,7 @@ Follow 默认把当前主农场主作为目标，命令成功后立即返回长�
 
 `move_relative` 的 `ticks` 由 CLI 限制为 `1..=30`。`observe` 的 `radius` 由 CLI 和 Mod 共同限制为 `1..=16`。限制是为了避免单个请求无限占用游戏 tick 或产生过大的观察结果。
 
-所有 action 命令都异步提交并立即返回 request ID：
+涉及游戏操作的命令都异步提交并立即返回 request ID：
 
 ```text
 stardew-cli move-to --x 120 --y 80
@@ -699,7 +756,7 @@ stardew-cli wait <request-id>
 stardew-cli cancel <request-id>
 ```
 
-所有 action 命令都使用相同的 `request_id`、`wait` 和 `cancel` 机制，而不是为 `move_to` 单独设计一套取消协议。CLI 的等待超时只表示 `wait` 停止等待，不会隐式取消目标 action。
+信息类命令的实时读取也使用相同的 `request_id` 和结果文件，但 CLI 会自动执行一次 `wait`，直接向调用方返回读取结果。所有请求仍使用相同的 `request_id`、`wait` 和 `cancel` 机制，而不是为 `move_to` 单独设计一套取消协议。CLI 的等待超时只表示等待停止，不会隐式取消目标 action。
 
 ## SMAPI Mod 行为
 
@@ -764,7 +821,8 @@ cargo run --manifest-path cli/Cargo.toml --bin fake-mod -- \
 Fake Mod 可以验证：
 
 - CLI 是否能写入请求文件；
-- action 命令是否立即返回受理回执和 request ID；
+- 游戏操作命令是否立即返回受理回执和 request ID；
+- 信息类实时命令是否提交请求并等待结果后直接输出；
 - 请求是否能被领取、归档并产生同 ID 结果；
 - cancel 是否优先于普通 pending 请求，并能取消尚未执行的 action；
 - 每类动作的 JSON 字段和结果形状；
@@ -936,7 +994,7 @@ Mod 项目目标框架为 `net6.0`。Mac 可以安装 .NET SDK 编译 C# 工程�
 - [x] 所有 action 请求支持 pending 阶段取消，长生命周期 action 支持运行中取消；
 - [x] `move_relative`、`move_to`、钓鱼、自动战斗和气泡的活动状态可被取消并完成清理；
 - [x] 一次性和只读 action 具备统一的取消前检查及已完成结果语义；
-- [x] 所有 action 命令默认异步提交并立即返回 request ID；
+- [ ] CLI 按命令语义区分同步信息读取和异步游戏操作；
 - [x] CLI 支持按 request ID 等待结果和从另一个进程发送取消请求；
 - [x] Fake Mod 覆盖 pending 取消优先级和目标结果关联；
 - [x] CLI 提供 `follow [--distance <tiles>]` 并异步返回长期任务 request ID；
