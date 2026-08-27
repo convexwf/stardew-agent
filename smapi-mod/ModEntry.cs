@@ -49,7 +49,7 @@ internal sealed class ModEntry : Mod
             && latestIndex.Value < _snapshotHistoryLimit
             ? latestIndex.Value
             : history.Index;
-        _companion = new CompanionController(helper, Monitor);
+        _companion = new CompanionController(helper, Monitor, config.BubbleTemplates);
         _moveExecutor = new MoveExecutor(_companion);
 
         helper.Events.GameLoop.UpdateTicked += OnUpdateTicked;
@@ -105,7 +105,8 @@ internal sealed class ModEntry : Mod
         ProcessPendingCancellationRequests();
         FinishMoveIfReady(_moveExecutor?.Tick());
         FinishActionIfReady(_companion?.TickFollow());
-        FinishActionIfReady(_companion?.TickFishingAction());
+        FinishActionIfReady(_companion?.TickAutonomousMode());
+        FinishActionIfReady(_companion?.IsModeActive == true ? null : _companion?.TickFishingAction());
         FinishBubbleIfReady();
         ProcessPendingRequests();
     }
@@ -257,6 +258,9 @@ internal sealed class ModEntry : Mod
                 case "follow":
                     StartFollow(request, processingPath);
                     break;
+                case "start_mode":
+                    StartMode(request, processingPath);
+                    break;
                 case "face_direction":
                     ExecuteFaceDirection(request, processingPath);
                     break;
@@ -406,6 +410,29 @@ internal sealed class ModEntry : Mod
         }
 
         _activeAction = new ActiveAction(request.RequestId!, "follow", processingPath, actorId, data);
+    }
+
+    private void StartMode(Envelope<JsonElement> request, string processingPath)
+    {
+        var payload = Deserialize<ModeStartPayload>(request);
+        if (!TryValidateActor(request, "start_mode", out var actorId))
+        {
+            Archive(processingPath);
+            return;
+        }
+
+        object? data = null;
+        ErrorDetail? error = null;
+        var success = _companion is not null
+            && _companion.TryStartMode(request.RequestId!, payload.Mode, out data, out error);
+        if (!success)
+        {
+            WriteActionResult(request.RequestId!, "start_mode", actorId, false, null, error);
+            Archive(processingPath);
+            return;
+        }
+
+        _activeAction = new ActiveAction(request.RequestId!, "start_mode", processingPath, actorId, data);
     }
 
     private void ExecuteFaceDirection(Envelope<JsonElement> request, string processingPath)
@@ -782,6 +809,9 @@ internal sealed class ModEntry : Mod
             && enabled.ValueKind == JsonValueKind.False)
             return true;
 
+        if (action is "ping" or "observe" or "get_inventory")
+            return true;
+
         return false;
     }
 
@@ -875,6 +905,10 @@ internal sealed class ModEntry : Mod
                 var followCompletion = _companion?.CancelFollow(code, message);
                 FinishActionIfReady(followCompletion);
                 return followCompletion is not null;
+            case "start_mode":
+                var modeCompletion = _companion?.CancelMode(code, message);
+                FinishActionIfReady(modeCompletion);
+                return modeCompletion is not null;
             default:
                 return false;
         }

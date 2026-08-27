@@ -495,6 +495,7 @@ fn action_actor_id(payload: &ActionRequestPayload) -> &str {
         | ActionRequestPayload::MoveRelative { actor_id, .. }
         | ActionRequestPayload::MoveTo { actor_id, .. }
         | ActionRequestPayload::Follow { actor_id, .. }
+        | ActionRequestPayload::StartMode { actor_id, .. }
         | ActionRequestPayload::FaceDirection { actor_id, .. }
         | ActionRequestPayload::UseTool { actor_id, .. }
         | ActionRequestPayload::Interact { actor_id, .. }
@@ -517,6 +518,7 @@ fn action_name(payload: &ActionRequestPayload) -> &'static str {
         ActionRequestPayload::MoveRelative { .. } => "move_relative",
         ActionRequestPayload::MoveTo { .. } => "move_to",
         ActionRequestPayload::Follow { .. } => "follow",
+        ActionRequestPayload::StartMode { .. } => "start_mode",
         ActionRequestPayload::FaceDirection { .. } => "face_direction",
         ActionRequestPayload::UseTool { .. } => "use_tool",
         ActionRequestPayload::Interact { .. } => "interact",
@@ -581,6 +583,12 @@ fn execute_request(
             Some(COMPANION_ID),
             "invalid_request",
             "follow requests must be started by the follow task handler".to_owned(),
+        ),
+        ActionRequestPayload::StartMode { actor_id, mode } => succeeded(
+            &request_id,
+            "start_mode",
+            &actor_id,
+            json!({"mode": mode, "state": "succeeded"}),
         ),
         ActionRequestPayload::FaceDirection {
             actor_id,

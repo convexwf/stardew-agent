@@ -80,6 +80,15 @@ internal sealed class FollowPayload
     public int Distance { get; set; } = 2;
 }
 
+internal sealed class ModeStartPayload
+{
+    [JsonPropertyName("actor_id")]
+    public string ActorId { get; set; } = "companion-1";
+
+    [JsonPropertyName("mode")]
+    public string Mode { get; set; } = "";
+}
+
 internal sealed class FaceDirectionPayload
 {
     [JsonPropertyName("actor_id")]
@@ -394,8 +403,32 @@ internal sealed class CompanionInfo
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public FollowInfo? Follow { get; set; }
 
+    [JsonPropertyName("mode_info")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ModeInfo? ModeInfo { get; set; }
+
     [JsonPropertyName("capabilities")]
     public List<string> Capabilities { get; set; } = new();
+}
+
+internal sealed class ModeInfo
+{
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = "";
+
+    [JsonPropertyName("state")]
+    public string State { get; set; } = "scanning";
+
+    [JsonPropertyName("target_tile")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public TileDto? TargetTile { get; set; }
+
+    [JsonPropertyName("completed_count")]
+    public int CompletedCount { get; set; }
+
+    [JsonPropertyName("last_notice")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? LastNotice { get; set; }
 }
 
 internal sealed class FollowInfo

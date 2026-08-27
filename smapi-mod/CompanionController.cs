@@ -35,21 +35,50 @@ internal sealed class CompanionController
     private string _followState = "idle";
     private int _followWarpCount;
     private string? _followLastWarpLocation;
+    private readonly IReadOnlyDictionary<string, string> _bubbleTemplates;
+    private bool _modeActive;
+    private string? _modeRequestId;
+    private string? _modeName;
+    private string _modeState = "idle";
+    private Point _modeTargetTile;
+    private Point _modePathTile;
+    private int _modePhaseTicks;
+    private int _modeRetries;
+    private int _modeCompletedCount;
+    private int _modeBlockedTicks;
+    private float _modeBeforeHealth;
+    private string? _modeLastNotice;
+    private int _modeBubbleCooldown;
 
     private const int FollowMaxDistance = 8;
     private const int FollowEmergencyWarpDistance = 10;
     private const int FollowRepathInterval = 15;
     private const int FollowBlockedTimeout = 60;
+    private const int ModePathTimeout = 180;
+    private const int ModeVerificationDelay = 12;
+    private const int ModeMaxRetries = 3;
+    private const int ModeBubbleCooldownTicks = 300;
 
-    public CompanionController(IModHelper helper, IMonitor monitor)
+    private static readonly HashSet<string> SupportedModes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "chop_trees",
+        "water_crops",
+        "harvest_crops",
+        "plant_crops",
+        "mine",
+        "fish"
+    };
+
+    public CompanionController(IModHelper helper, IMonitor monitor, IReadOnlyDictionary<string, string>? bubbleTemplates = null)
     {
         _helper = helper;
         _monitor = monitor;
+        _bubbleTemplates = bubbleTemplates ?? new Dictionary<string, string>();
     }
 
     public bool IsSpawned => _visual is not null && _shadow is not null;
 
-    public bool IsBusy => _activeMove is not null || _fishingActive || _autoCombat || _followActive || HasSpeechBubble;
+    public bool IsBusy => _activeMove is not null || _fishingActive || _autoCombat || _followActive || _modeActive || HasSpeechBubble;
 
     public bool IsFishingActive => _fishingActive;
 
@@ -57,6 +86,7 @@ internal sealed class CompanionController
 
     public string? CurrentAction => _activeMove?.Action
         ?? (_fishingActive ? "cast_fishing_rod" : null)
+        ?? (_modeActive ? _modeName : null)
         ?? (_followActive ? "follow" : null)
         ?? (_autoCombat ? "set_auto_combat" : null)
         ?? (HasSpeechBubble ? "bubble" : null);
@@ -64,6 +94,8 @@ internal sealed class CompanionController
     public bool AutoCombat => _autoCombat;
 
     public bool IsFollowing => _followActive;
+
+    public bool IsModeActive => _modeActive;
 
     public void EnsureSpawned()
     {
@@ -426,6 +458,646 @@ internal sealed class CompanionController
             WarpCount = _followWarpCount,
             LastWarpLocation = _followLastWarpLocation
         };
+    }
+
+    public bool TryStartMode(string requestId, string mode, out object? data, out ErrorDetail? error)
+    {
+        data = null;
+        error = null;
+        var normalizedMode = (mode ?? "").Trim().ToLowerInvariant();
+        if (!SupportedModes.Contains(normalizedMode))
+        {
+            error = new ErrorDetail
+            {
+                Code = "unsupported_mode",
+                Message = $"unsupported mode: {mode}"
+            };
+            return false;
+        }
+
+        EnsureSpawned();
+        if (!Context.IsWorldReady || _visual is null || _shadow is null || _visual.currentLocation is null)
+        {
+            error = new ErrorDetail { Code = "world_not_ready", Message = "the companion is not spawned" };
+            return false;
+        }
+        if (_activeMove is not null || _fishingActive || _autoCombat || _followActive || _modeActive || HasSpeechBubble)
+        {
+            error = new ErrorDetail { Code = "busy", Message = "the companion is already running another action" };
+            return false;
+        }
+
+        _modeActive = true;
+        _modeRequestId = requestId;
+        _modeName = normalizedMode;
+        _modeState = "scanning";
+        _modeTargetTile = Point.Zero;
+        _modePathTile = Point.Zero;
+        _modePhaseTicks = 0;
+        _modeRetries = 0;
+        _modeCompletedCount = 0;
+        _modeBlockedTicks = 0;
+        _modeBeforeHealth = 0;
+        _modeLastNotice = null;
+        _modeBubbleCooldown = 0;
+        data = new { mode = normalizedMode, state = _modeState };
+        return true;
+    }
+
+    public ActionCompletion? TickAutonomousMode()
+    {
+        if (!_modeActive || _modeRequestId is null || _modeName is null || _visual is null || _shadow is null)
+            return null;
+        if (!Context.IsWorldReady || _visual.currentLocation is null)
+            return FinishMode("failed", "world_not_ready", "the game world is no longer available");
+
+        if (_modeBubbleCooldown > 0)
+            _modeBubbleCooldown--;
+        SyncShadow();
+
+        if (_modeState == "paused")
+        {
+            _modePhaseTicks++;
+            if (_modePhaseTicks < ModeBubbleCooldownTicks)
+                return null;
+            _modeState = "scanning";
+            _modePhaseTicks = 0;
+        }
+
+        if (_modeState == "moving")
+            return TickModeMovement();
+        if (_modeState == "acting")
+            return TickModeAction();
+        if (_modeState == "verifying")
+            return TickModeVerification();
+        if (_modeState == "fishing")
+            return TickModeFishing();
+
+        return TickModeScan();
+    }
+
+    public ActionCompletion? CancelMode(string code, string message)
+    {
+        if (!_modeActive || _modeRequestId is null)
+            return null;
+
+        if (_fishingActive)
+        {
+            _fishingActive = false;
+            _fishingRequestId = null;
+        }
+        return FinishMode("cancelled", code, message);
+    }
+
+    public ModeInfo? GetModeInfo()
+    {
+        if (!_modeActive || _modeName is null)
+            return null;
+        return new ModeInfo
+        {
+            Id = _modeName,
+            State = _modeState,
+            TargetTile = _modeState is "moving" or "acting" or "verifying" or "fishing"
+                ? new TileDto { X = _modeTargetTile.X, Y = _modeTargetTile.Y }
+                : null,
+            CompletedCount = _modeCompletedCount,
+            LastNotice = _modeLastNotice
+        };
+    }
+
+    private ActionCompletion? TickModeScan()
+    {
+        if (_modeName is null || _visual?.currentLocation is null)
+            return FinishMode("failed", "world_not_ready", "the companion location is unavailable");
+
+        if (_modeName == "mine" && _visual.currentLocation is not MineShaft)
+        {
+            PauseMode("ModeActionFailed", "mine", "the companion must be inside a mine shaft");
+            return null;
+        }
+
+        var target = FindModeTarget();
+        if (target is null)
+        {
+            if (_modeName == "fish")
+            {
+                PauseMode("NoFishingWater", "fish", "no fishable water was found nearby");
+                return null;
+            }
+            return FinishMode("succeeded", null, null);
+        }
+
+        if (!HasModePrerequisites())
+            return null;
+
+        _modeTargetTile = target.Value;
+        _modePathTile = FindModeApproachTile(_visual.currentLocation, _modeTargetTile) ?? Point.Zero;
+        if (_modePathTile == Point.Zero)
+        {
+            PauseMode("PathBlocked", _modeName, "no passable tile was found near the target");
+            return null;
+        }
+
+        _modeRetries = 0;
+        _modeBlockedTicks = 0;
+        _modePhaseTicks = 0;
+        if (ReadTile().X == _modePathTile.X && ReadTile().Y == _modePathTile.Y)
+        {
+            _modeState = "acting";
+            return null;
+        }
+
+        try
+        {
+            _visual.controller = new PathFindController(_visual, _visual.currentLocation, _modePathTile, 2);
+            _modeState = "moving";
+            return null;
+        }
+        catch (Exception exception)
+        {
+            _monitor.Log($"Mode pathfinding failed: {exception.Message}", LogLevel.Debug);
+            PauseMode("PathBlocked", _modeName, exception.Message);
+            return null;
+        }
+    }
+
+    private ActionCompletion? TickModeMovement()
+    {
+        if (_visual is null || _modeName is null)
+            return FinishMode("failed", "world_not_ready", "the companion is unavailable");
+
+        _modePhaseTicks++;
+        if (_visual.controller is not null && _modePhaseTicks <= ModePathTimeout)
+            return null;
+
+        var current = ReadTile();
+        if (Math.Abs(current.X - _modePathTile.X) <= 1 && Math.Abs(current.Y - _modePathTile.Y) <= 1)
+        {
+            _visual.controller = null;
+            _modeState = "acting";
+            _modePhaseTicks = 0;
+            return null;
+        }
+
+        _visual.controller = null;
+        _modeBlockedTicks++;
+        if (_modeBlockedTicks >= ModeMaxRetries)
+            PauseMode("PathBlocked", _modeName, "the companion could not reach the target");
+        else
+        {
+            _modeState = "scanning";
+            _modePhaseTicks = 0;
+        }
+        return null;
+    }
+
+    private ActionCompletion? TickModeAction()
+    {
+        if (_modeName is null)
+            return FinishMode("failed", "world_not_ready", "the mode is unavailable");
+
+        ErrorDetail? error = null;
+        var success = _modeName switch
+        {
+            "chop_trees" => TryUseModeTool(typeof(Axe), out error),
+            "water_crops" => TryUseModeTool(typeof(WateringCan), out error),
+            "harvest_crops" => TryHarvestModeCrop(out error),
+            "plant_crops" => TryPlantModeCrop(out error),
+            "mine" => TryUseModeTool(typeof(Pickaxe), out error),
+            "fish" => TryStartModeFishing(out error),
+            _ => false
+        };
+        if (!success)
+        {
+            PauseMode("ModeActionFailed", _modeName, error?.Message ?? "the current mode action failed");
+            return null;
+        }
+
+        if (_modeName == "fish")
+        {
+            _modeState = "fishing";
+            _modePhaseTicks = 0;
+        }
+        else
+        {
+            _modeState = "verifying";
+            _modePhaseTicks = 0;
+        }
+        return null;
+    }
+
+    private ActionCompletion? TickModeVerification()
+    {
+        _modePhaseTicks++;
+        if (_modePhaseTicks < ModeVerificationDelay)
+            return null;
+
+        if (IsModeTargetComplete())
+        {
+            _modeCompletedCount++;
+            _modeState = "scanning";
+            _modePhaseTicks = 0;
+            _modeRetries = 0;
+            return null;
+        }
+
+        if (_modeName == "chop_trees"
+            && GetTreeAt(_modeTargetTile) is Tree tree
+            && tree.health.Value < _modeBeforeHealth)
+        {
+            _modeRetries = 0;
+            _modeState = "acting";
+            _modePhaseTicks = 0;
+            return null;
+        }
+
+        if (_modeRetries < ModeMaxRetries)
+        {
+            _modeRetries++;
+            _modeState = "acting";
+            _modePhaseTicks = 0;
+            return null;
+        }
+
+        PauseMode("ModeActionFailed", _modeName ?? "work", "the target did not reach its expected state");
+        return null;
+    }
+
+    private ActionCompletion? TickModeFishing()
+    {
+        var completion = TickFishingAction();
+        if (completion is null)
+            return null;
+        if (completion.Status != "succeeded")
+            return FinishMode("failed", completion.Error?.Code ?? "fishing_failed", completion.Error?.Message ?? "fishing failed");
+
+        _modeCompletedCount++;
+        _modeState = "scanning";
+        _modePhaseTicks = 0;
+        return null;
+    }
+
+    private bool HasModePrerequisites()
+    {
+        if (_shadow is null || _modeName is null)
+            return false;
+        switch (_modeName)
+        {
+            case "chop_trees":
+                if (FindTool<Axe>() is null)
+                {
+                    PauseMode("MissingTool", "axe", "the companion has no axe");
+                    return false;
+                }
+                break;
+            case "water_crops":
+                var wateringCan = FindTool<WateringCan>();
+                if (wateringCan is null)
+                {
+                    PauseMode("MissingTool", "watering can", "the companion has no watering can");
+                    return false;
+                }
+                if (wateringCan.WaterLeft <= 0)
+                {
+                    PauseMode("NoWater", "water crops", "the watering can is empty");
+                    return false;
+                }
+                break;
+            case "harvest_crops":
+                if (!HasInventorySpace())
+                {
+                    PauseMode("InventoryFull", "harvest crops", "the companion inventory has no free slot");
+                    return false;
+                }
+                break;
+            case "plant_crops":
+                if (FindSeedSlot() < 0)
+                {
+                    PauseMode("MissingSeed", "plant crops", "the companion has no seed");
+                    return false;
+                }
+                break;
+            case "mine":
+                if (FindTool<Pickaxe>() is null)
+                {
+                    PauseMode("MissingTool", "pickaxe", "the companion has no pickaxe");
+                    return false;
+                }
+                break;
+            case "fish":
+                if (FindTool<FishingRod>() is null)
+                {
+                    PauseMode("MissingTool", "fishing rod", "the companion has no fishing rod");
+                    return false;
+                }
+                break;
+        }
+        if (_shadow.Stamina <= 0)
+        {
+            PauseMode("LowStamina", _modeName, "the companion has no stamina");
+            return false;
+        }
+        return true;
+    }
+
+    private Point? FindModeTarget()
+    {
+        if (_visual?.currentLocation is null || _modeName is null)
+            return null;
+        var location = _visual.currentLocation;
+        var origin = _visual.Tile;
+        if (_modeName == "chop_trees")
+        {
+            var targets = location.terrainFeatures.Keys
+                .Where(tile => location.terrainFeatures.TryGetValue(tile, out var feature)
+                    && feature is Tree tree
+                    && tree.growthStage.Value >= Tree.treeStage
+                    && !tree.stump.Value
+                    && tree.health.Value > 0)
+                .OrderBy(tile => Vector2.DistanceSquared(tile, origin))
+                .Select(tile => new Point((int)tile.X, (int)tile.Y))
+                .ToList();
+            return targets.Count == 0 ? null : targets[0];
+        }
+        if (_modeName is "water_crops" or "harvest_crops" or "plant_crops")
+        {
+            var targets = location.terrainFeatures.Keys
+                .Where(tile => location.terrainFeatures.TryGetValue(tile, out var feature)
+                    && feature is HoeDirt dirt
+                    && _modeName switch
+                {
+                    "water_crops" => dirt.crop is not null && dirt.needsWatering(),
+                    "harvest_crops" => dirt.crop is not null && dirt.readyForHarvest(),
+                    "plant_crops" => dirt.crop is null,
+                    _ => false
+                })
+                .OrderBy(tile => Vector2.DistanceSquared(tile, origin))
+                .Select(tile => new Point((int)tile.X, (int)tile.Y))
+                .ToList();
+            return targets.Count == 0 ? null : targets[0];
+        }
+        if (_modeName == "mine")
+        {
+            var targets = location.objects.Keys
+                .Where(tile => location.objects.TryGetValue(tile, out var obj) && obj.IsBreakableStone())
+                .OrderBy(tile => Vector2.DistanceSquared(tile, origin))
+                .Select(tile => new Point((int)tile.X, (int)tile.Y))
+                .ToList();
+            return targets.Count == 0 ? null : targets[0];
+        }
+        if (_modeName == "fish")
+        {
+            for (var radius = 1; radius <= 8; radius++)
+            {
+                for (var dx = -radius; dx <= radius; dx++)
+                {
+                    for (var dy = -radius; dy <= radius; dy++)
+                    {
+                        var tile = new Point((int)origin.X + dx, (int)origin.Y + dy);
+                        if (location.isWaterTile(tile.X, tile.Y))
+                            return tile;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private Point? FindModeApproachTile(GameLocation location, Point target)
+    {
+        var candidates = new[]
+        {
+            target,
+            new Point(target.X + 1, target.Y),
+            new Point(target.X - 1, target.Y),
+            new Point(target.X, target.Y - 1),
+            new Point(target.X, target.Y + 1)
+        };
+        foreach (var candidate in candidates)
+        {
+            if (location.isTilePassable(new xTile.Dimensions.Location(candidate.X, candidate.Y), Game1.viewport))
+                return candidate;
+        }
+        return null;
+    }
+
+    private bool TryUseModeTool(Type toolType, out ErrorDetail? error)
+    {
+        error = null;
+        if (_modeName == "chop_trees" && GetTreeAt(_modeTargetTile) is Tree treeBefore)
+            _modeBeforeHealth = treeBefore.health.Value;
+        if (!UseToolAt(new Vector2(_modeTargetTile.X, _modeTargetTile.Y), toolType))
+        {
+            error = new ErrorDetail { Code = "tool_use_failed", Message = $"failed to use {toolType.Name} at the target" };
+            return false;
+        }
+        return true;
+    }
+
+    private bool TryHarvestModeCrop(out ErrorDetail? error)
+    {
+        error = null;
+        if (_shadow is null || _visual?.currentLocation is null
+            || !_visual.currentLocation.terrainFeatures.TryGetValue(new Vector2(_modeTargetTile.X, _modeTargetTile.Y), out var feature)
+            || feature is not HoeDirt dirt
+            || dirt.crop is null
+            || !dirt.readyForHarvest())
+        {
+            error = new ErrorDetail { Code = "harvest_target_missing", Message = "the crop is no longer ready for harvest" };
+            return false;
+        }
+        if (!HasInventorySpace())
+        {
+            error = new ErrorDetail { Code = "inventory_full", Message = "the companion inventory has no free slot" };
+            return false;
+        }
+        if (!dirt.crop.harvest(_modeTargetTile.X, _modeTargetTile.Y, dirt, null))
+        {
+            error = new ErrorDetail { Code = "harvest_failed", Message = "the crop could not be harvested" };
+            return false;
+        }
+        return true;
+    }
+
+    private bool TryPlantModeCrop(out ErrorDetail? error)
+    {
+        error = null;
+        if (_shadow is null || _visual?.currentLocation is null
+            || !_visual.currentLocation.terrainFeatures.TryGetValue(new Vector2(_modeTargetTile.X, _modeTargetTile.Y), out var feature)
+            || feature is not HoeDirt dirt
+            || dirt.crop is not null)
+        {
+            error = new ErrorDetail { Code = "plant_target_invalid", Message = "the target is not an empty tilled tile" };
+            return false;
+        }
+        var seedSlot = FindSeedSlot();
+        if (seedSlot < 0 || _shadow.Items[seedSlot] is not StardewValley.Object seed)
+        {
+            error = new ErrorDetail { Code = "no_seed", Message = "the companion has no seed" };
+            return false;
+        }
+        if (!dirt.plant(seed.ItemId, _shadow, false))
+        {
+            error = new ErrorDetail { Code = "plant_failed", Message = "the seed cannot be planted on the target tile" };
+            return false;
+        }
+        seed.Stack--;
+        if (seed.Stack <= 0)
+            _shadow.Items[seedSlot] = null;
+        return true;
+    }
+
+    private bool TryStartModeFishing(out ErrorDetail? error)
+    {
+        object? data = null;
+        return TryCastFishingRod(_modeRequestId ?? "unknown", out data, out error);
+    }
+
+    private bool IsModeTargetComplete()
+    {
+        if (_visual?.currentLocation is null || _modeName is null)
+            return false;
+        var tile = new Vector2(_modeTargetTile.X, _modeTargetTile.Y);
+        var location = _visual.currentLocation;
+        return _modeName switch
+        {
+            "chop_trees" => !location.terrainFeatures.TryGetValue(tile, out var treeFeature)
+                || treeFeature is not Tree tree
+                || tree.stump.Value
+                || tree.health.Value <= 0,
+            "water_crops" => !location.terrainFeatures.TryGetValue(tile, out var waterFeature)
+                || waterFeature is not HoeDirt waterDirt
+                || waterDirt.crop is null
+                || !waterDirt.needsWatering(),
+            "harvest_crops" => !location.terrainFeatures.TryGetValue(tile, out var harvestFeature)
+                || harvestFeature is not HoeDirt harvestDirt
+                || harvestDirt.crop is null
+                || !harvestDirt.readyForHarvest(),
+            "plant_crops" => location.terrainFeatures.TryGetValue(tile, out var plantFeature)
+                && plantFeature is HoeDirt plantDirt
+                && plantDirt.crop is not null,
+            "mine" => !location.objects.TryGetValue(tile, out var mineObject)
+                || !mineObject.IsBreakableStone(),
+            _ => false
+        };
+    }
+
+    private Tree? GetTreeAt(Point tile)
+    {
+        return _visual?.currentLocation?.terrainFeatures.TryGetValue(new Vector2(tile.X, tile.Y), out var feature) == true
+            ? feature as Tree
+            : null;
+    }
+
+    private T? FindTool<T>() where T : Tool
+    {
+        return _shadow?.Items.FirstOrDefault(item => item is T) as T;
+    }
+
+    private int FindSeedSlot()
+    {
+        if (_shadow is null)
+            return -1;
+        for (var index = 0; index < _shadow.Items.Count; index++)
+        {
+            if (_shadow.Items[index] is StardewValley.Object item
+                && item.Stack > 0
+                && item.Category == StardewValley.Object.SeedsCategory)
+                return index;
+        }
+        return -1;
+    }
+
+    private bool HasInventorySpace()
+    {
+        return _shadow?.Items.Any(item => item is null) == true;
+    }
+
+    private void PauseMode(string templateKey, string mode, string notice)
+    {
+        _modeState = "paused";
+        _modePhaseTicks = 0;
+        _modeLastNotice = notice;
+        ShowModeBubble(templateKey, mode, notice);
+    }
+
+    private void ShowModeBubble(string templateKey, string mode, string target)
+    {
+        if (_visual is null || _modeBubbleCooldown > 0)
+            return;
+        var text = _bubbleTemplates.TryGetValue(templateKey, out var configured)
+            ? configured
+            : templateKey switch
+            {
+                "MissingTool" => "我没有{tool}，无法继续{mode}。",
+                "MissingSeed" => "我没有可用的种子，无法继续播种。",
+                "NoTilledSoil" => "没有找到可以播种的已开垦土地。",
+                "InventoryFull" => "我的背包已满，无法继续工作。",
+                "PathBlocked" => "我在{location}遇到了障碍，正在重新寻找路径。",
+                "LowStamina" => "我太累了，需要休息。",
+                "NoWater" => "我的浇水壶没水了，无法继续浇水。",
+                "NoFishingWater" => "这里没有找到可以钓鱼的水域。",
+                _ => "我无法完成当前动作。"
+            };
+        var tool = mode switch
+        {
+            "chop_trees" => "斧头",
+            "water_crops" => "浇水壶",
+            "mine" => "镐",
+            "fish" => "鱼竿",
+            _ => "工具"
+        };
+        text = text
+            .Replace("{tool}", tool, StringComparison.Ordinal)
+            .Replace("{mode}", mode, StringComparison.Ordinal)
+            .Replace("{location}", _visual.currentLocation?.Name ?? "当前地点", StringComparison.Ordinal)
+            .Replace("{target}", target, StringComparison.Ordinal);
+        _visual.ShowTextAboveHead(text, 4000);
+        _modeBubbleCooldown = ModeBubbleCooldownTicks;
+    }
+
+    private ActionCompletion FinishMode(string status, string? code, string? message)
+    {
+        var requestId = _modeRequestId ?? "unknown";
+        var mode = _modeName ?? "unknown";
+        var data = new
+        {
+            mode,
+            state = status,
+            completed_count = _modeCompletedCount,
+            location = _visual?.currentLocation?.Name
+        };
+        var completion = new ActionCompletion
+        {
+            RequestId = requestId,
+            Action = "start_mode",
+            Status = status,
+            Data = data,
+            Error = code is null ? null : new ErrorDetail { Code = code, Message = message ?? code }
+        };
+        ClearModeState();
+        return completion;
+    }
+
+    private void ClearModeState()
+    {
+        if (_visual is not null)
+            _visual.controller = null;
+        _fishingActive = false;
+        _fishingRequestId = null;
+        _modeActive = false;
+        _modeRequestId = null;
+        _modeName = null;
+        _modeState = "idle";
+        _modeTargetTile = Point.Zero;
+        _modePathTile = Point.Zero;
+        _modePhaseTicks = 0;
+        _modeRetries = 0;
+        _modeCompletedCount = 0;
+        _modeBlockedTicks = 0;
+        _modeBeforeHealth = 0;
+        _modeLastNotice = null;
+        _modeBubbleCooldown = 0;
     }
 
     public bool TryStartMove(string requestId, string direction, int ticks, out MoveCompletion? failure)
@@ -899,17 +1571,19 @@ internal sealed class CompanionController
             MaxStamina = _shadow?.MaxStamina ?? 0,
             InventoryCount = inventory.Count,
             Inventory = inventory,
-            Mode = _followActive ? "follow" : "direct",
-            Status = _activeMove is not null ? "moving" : _fishingActive ? "fishing" : _followActive ? "following" : _autoCombat ? "auto-combat" : HasSpeechBubble ? "bubble" : "idle",
+            Mode = _modeActive ? _modeName! : _followActive ? "follow" : "direct",
+            Status = _modeActive ? _modeState : _activeMove is not null ? "moving" : _fishingActive ? "fishing" : _followActive ? "following" : _autoCombat ? "auto-combat" : HasSpeechBubble ? "bubble" : "idle",
             CurrentAction = CurrentAction,
             WorldReady = Context.IsWorldReady && IsSpawned,
             Busy = IsBusy,
             AutoCombat = _autoCombat,
             Follow = GetFollowInfo(),
+            ModeInfo = GetModeInfo(),
             Capabilities = new List<string>
             {
                 "move_relative", "move_to", "face_direction", "use_tool", "interact", "warp_to",
-                "observe", "get_inventory", "attack", "cast_fishing_rod", "set_auto_combat", "eat_item", "say", "bubble", "follow", "cancel"
+                "observe", "get_inventory", "attack", "cast_fishing_rod", "set_auto_combat", "eat_item", "say", "bubble", "follow",
+                "start_mode", "chop_trees", "water_crops", "harvest_crops", "plant_crops", "mine", "fish", "cancel"
             }
         };
     }
@@ -924,6 +1598,7 @@ internal sealed class CompanionController
         _shadow?.WakeUp();
         _fishingActive = false;
         _fishingRequestId = null;
+        ClearModeState();
         ClearFollowState();
     }
 
@@ -939,6 +1614,7 @@ internal sealed class CompanionController
         _fishingRequestId = null;
         _autoCombat = false;
         _autoCombatCooldown = 0;
+        ClearModeState();
         ClearFollowState();
     }
 

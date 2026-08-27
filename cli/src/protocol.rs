@@ -34,6 +34,10 @@ pub enum ActionRequestPayload {
         target_actor_id: String,
         distance: u32,
     },
+    StartMode {
+        actor_id: String,
+        mode: String,
+    },
     FaceDirection {
         actor_id: String,
         direction: Direction,
@@ -142,6 +146,7 @@ impl ActionRequestPayload {
             Self::MoveRelative { .. } => "move_relative",
             Self::MoveTo { .. } => "move_to",
             Self::Follow { .. } => "follow",
+            Self::StartMode { .. } => "start_mode",
             Self::FaceDirection { .. } => "face_direction",
             Self::UseTool { .. } => "use_tool",
             Self::Interact { .. } => "interact",

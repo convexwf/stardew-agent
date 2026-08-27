@@ -102,6 +102,18 @@ enum Command {
         #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(1..=8))]
         distance: u32,
     },
+    /// Continuously work on eligible trees in the current location.
+    ChopTrees,
+    /// Continuously water eligible crops in the current location.
+    WaterCrops,
+    /// Continuously harvest ready crops in the current location.
+    HarvestCrops,
+    /// Continuously plant seeds on existing empty tilled soil.
+    PlantCrops,
+    /// Continuously break eligible stones in the current mine level.
+    Mine,
+    /// Continuously fish in nearby water until cancelled.
+    Fish,
     /// Change the Companion facing direction.
     #[command(alias = "face_direction")]
     Face {
@@ -287,6 +299,48 @@ fn run() -> Result<()> {
                 actor_id: COMPANION_ID.to_owned(),
                 target_actor_id: "player".to_owned(),
                 distance,
+            },
+        ),
+        Command::ChopTrees => submit_and_print(
+            &bridge,
+            ActionRequestPayload::StartMode {
+                actor_id: COMPANION_ID.to_owned(),
+                mode: "chop_trees".to_owned(),
+            },
+        ),
+        Command::WaterCrops => submit_and_print(
+            &bridge,
+            ActionRequestPayload::StartMode {
+                actor_id: COMPANION_ID.to_owned(),
+                mode: "water_crops".to_owned(),
+            },
+        ),
+        Command::HarvestCrops => submit_and_print(
+            &bridge,
+            ActionRequestPayload::StartMode {
+                actor_id: COMPANION_ID.to_owned(),
+                mode: "harvest_crops".to_owned(),
+            },
+        ),
+        Command::PlantCrops => submit_and_print(
+            &bridge,
+            ActionRequestPayload::StartMode {
+                actor_id: COMPANION_ID.to_owned(),
+                mode: "plant_crops".to_owned(),
+            },
+        ),
+        Command::Mine => submit_and_print(
+            &bridge,
+            ActionRequestPayload::StartMode {
+                actor_id: COMPANION_ID.to_owned(),
+                mode: "mine".to_owned(),
+            },
+        ),
+        Command::Fish => submit_and_print(
+            &bridge,
+            ActionRequestPayload::StartMode {
+                actor_id: COMPANION_ID.to_owned(),
+                mode: "fish".to_owned(),
             },
         ),
         Command::Face { direction } => submit_and_print(

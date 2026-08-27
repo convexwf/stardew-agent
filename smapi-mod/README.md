@@ -17,11 +17,14 @@ face_direction      use_tool            interact
 warp_to             observe              get_inventory
 attack              cast_fishing_rod    set_auto_combat
 eat_item             say                 bubble
+start_mode           follow
 ```
+
+`start_mode` 当前支持 `chop_trees`、`water_crops`、`harvest_crops`、`plant_crops`、`mine` 和 `fish`。这些模式由 Mod 在游戏 Tick 中持续执行，快照中的 `companion.mode_info` 暴露当前阶段；CLI 只需提交一次模式请求，结束模式使用对应 request ID 调用 `cancel`。
 
 CLI 与协议字段、结果示例和完整链路见 [`doc/demo/cli-file-bridge.md`](../doc/demo/cli-file-bridge.md)。Mod 只接受 `actor_id=companion-1`；主农场主只进入状态快照，不是这些动作的目标。
 
-`warp_to` 是显式传送，可以把 Companion 放到另一个已加载地点；当前 Mod 没有跨地图自主寻路，也没有 follow、farm、mine、fish 等自主调度模式。`use_tool`、`attack` 和 `cast_fishing_rod` 是否成功，取决于 shadow farmer 背包和游戏中的目标、地点及其他前置条件。
+`warp_to` 是显式传送，可以把 Companion 放到另一个已加载地点；Follow 会在 Mod 内持续跟随主农场主。农场持续模式只处理当前地点可扫描的树木和耕地，`mine` 只处理当前矿井楼层的可破坏石块，`fish` 在当前地点附近水域推进鱼竿状态机。`use_tool`、`attack` 和 `cast_fishing_rod` 是否成功，取决于 shadow farmer 背包和游戏中的目标、地点及其他前置条件。
 
 ## 配置
 
@@ -32,7 +35,18 @@ CLI 与协议字段、结果示例和完整链路见 [`doc/demo/cli-file-bridge.
   "BridgeDirectory": "",
   "LatestWriteIntervalSeconds": 5,
   "SnapshotHistoryIntervalSeconds": 60,
-  "SnapshotHistoryLimit": 10
+  "SnapshotHistoryLimit": 10,
+  "BubbleTemplates": {
+    "MissingTool": "我没有{tool}，无法继续{mode}。",
+    "MissingSeed": "我没有可用的种子，无法继续播种。",
+    "NoTilledSoil": "没有找到可以播种的已开垦土地。",
+    "InventoryFull": "我的背包已满，无法继续工作。",
+    "PathBlocked": "我在{location}遇到了障碍，正在重新寻找路径。",
+    "LowStamina": "我太累了，需要休息。",
+    "NoWater": "我的浇水壶没水了，无法继续浇水。",
+    "NoFishingWater": "这里没有找到可以钓鱼的水域。",
+    "ModeActionFailed": "我无法完成{mode}的当前动作。"
+  }
 }
 ```
 
@@ -41,7 +55,8 @@ CLI 与协议字段、结果示例和完整链路见 [`doc/demo/cli-file-bridge.
 - `BridgeDirectory`：CLI 和 Mod 共同访问的 Bridge 目录；为空时使用 Mod 目录下的 `bridge/`；
 - `LatestWriteIntervalSeconds`：完整 `snapshots/snapshot-latest.json` 的写出间隔；
 - `SnapshotHistoryIntervalSeconds`：历史快照槽位的写出间隔；
-- `SnapshotHistoryLimit`：历史槽位数量。
+- `SnapshotHistoryLimit`：历史槽位数量；
+- `BubbleTemplates`：持续模式遇到缺少工具、资源、路径或背包问题时使用的官方 NPC 气泡文本模板；支持 `{tool}`、`{mode}`、`{location}` 和 `{target}` 占位符。
 
 历史文件使用固定槽位轮转。例如限制为 3 时，文件只会是 `snapshot-0.json`、`snapshot-1.json` 和 `snapshot-2.json`，写到末尾后重新覆盖 `snapshot-0.json`。`snapshot-latest.json` 始终保存完整最新状态，并记录最近历史快照的 `snapshot_index`，不是只保存一个指针。
 

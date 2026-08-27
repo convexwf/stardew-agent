@@ -120,6 +120,10 @@ fn fake_mod_supports_companion_read_and_write_actions() {
             x: 6,
             y: 6,
         }, "warp_to"),
+        (ActionRequestPayload::StartMode {
+            actor_id: COMPANION_ID.to_owned(),
+            mode: "water_crops".to_owned(),
+        }, "start_mode"),
         (ActionRequestPayload::Observe {
             actor_id: COMPANION_ID.to_owned(),
             radius: 8,

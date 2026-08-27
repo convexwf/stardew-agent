@@ -5,7 +5,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | **文档标题** | CLI 工具系统通信 Demo 技术实现方案 |
-| **文档版本** | v0.20 |
+| **文档版本** | v0.21 |
 | **创建日期** | 2026-08-23 |
 | **更新日期** | 2026-08-27 |
 | **文档类型** | 技术实现方案 |
@@ -65,11 +65,12 @@ Companion 的逻辑名称固定为 `companion-1`，这个名称同时用于 CLI 
 
 ## 当前实现范围
 
-当前 Demo 已实现三类能力：
+当前 Demo 已实现四类能力：
 
 1. **状态读取**：读取最新完整快照、世界、主农场主、Companion、环形历史快照，并请求即时观察和背包；
 2. **Companion 直控**：移动、转向、使用工具、交互、显式传送、攻击、钓鱼、自动战斗开关、吃物品、发送聊天消息、显示头顶气泡和取消动作；游戏操作命令异步提交，信息命令同步返回，pending 请求和长生命周期任务都支持取消；
 3. **链路诊断**：查看请求/结果、检查 Bridge 目录、清理历史请求文件和持续观察状态变化。
+4. **持续工作模式**：通过一次 `start_mode` 请求在 Mod 内运行 `chop_trees`、`water_crops`、`harvest_crops`、`plant_crops`、`mine` 和 `fish`；模式状态进入快照，使用同一个 request ID 取消。
 
 动作集合如下：
 
@@ -78,6 +79,7 @@ Companion 的逻辑名称固定为 `companion-1`，这个名称同时用于 CLI 
 | 连通性 | `ping` | 否；验证 CLI → Mod → CLI | 同步等待结果 |
 | 移动 | `move_relative`、`move_to` | 是；改变 Companion 的游戏内位置或移动任务；移动过程必须可取消 | 异步返回 request ID |
 | 跟随 | `follow` | 是；在 Mod 内持续跟随主农场主，同地图寻路并在跨地图时自动 warp；任务必须可取消 | 异步返回 request ID |
+| 持续工作 | `start_mode` | 是；在 Mod 内逐 Tick 扫描目标、移动、执行工具或鱼竿动作并验证状态；任务必须可取消 | 异步返回 request ID |
 | 姿态 | `face_direction` | 是；改变 Companion 朝向 | 异步返回 request ID |
 | 工具与交互 | `use_tool`、`interact` | 是；由游戏 API 决定是否成功 | 异步返回 request ID |
 | 地图 | `warp_to` | 是；显式把 Companion 移到指定地点和 tile | 异步返回 request ID |
@@ -304,11 +306,11 @@ Fake Mod 已验证 follow 请求的字段、异步受理、pending 状态和 can
 
 ## 持续模式扩展
 
-本节描述在 `follow` 之外扩展游戏侧持续模式的设计。当前 Demo 已实现 `follow`，其他模式属于后续扩展，不应被当成当前 CLI 已支持的命令。持续模式由 SMAPI Mod 在游戏线程中维护，CLI 或 Agent Runtime 只负责启动、查询和取消，不通过外部循环反复提交低级 `move_to` 或 `use_tool`。
+本节描述在 `follow` 之外的游戏侧持续模式及其当前实现。持续模式由 SMAPI Mod 在游戏线程中维护，CLI 或 Agent Runtime 只负责启动、查询和取消，不通过外部循环反复提交低级 `move_to` 或 `use_tool`。
 
 每个持续模式都持有一个 actor lease。单个 `companion-1` 同时只能运行一个持续模式或 foreground action；模式启动后异步返回 request ID，并在运行期间通过快照暴露当前状态，直到完成、失败、取消或被新的计划取代才写入终态结果。模式处于 `paused` 或 `waiting` 时保留活动状态，等待资源补充、环境变化或后续控制请求。
 
-计划中的模式边界如下：
+当前模式边界如下：
 
 | 模式 ID | 目标 | 典型结束或暂停条件 |
 | --- | --- | --- |
@@ -317,8 +319,8 @@ Fake Mod 已验证 follow 请求的字段、异步受理、pending 状态和 can
 | `water_crops` | 为需要浇水的耕地浇水 | 当日没有可浇水目标、缺少浇水壶、体力不足、用户取消 |
 | `harvest_crops` | 收获成熟作物 | 没有成熟作物、背包无法接收、路径持续阻塞、用户取消 |
 | `plant_crops` | 在已开垦且符合条件的耕地上播种 | 没有可用种子、没有符合条件的已开垦土地、路径问题、用户取消 |
-| `mine` | 在矿井中处理矿石、梯子和必要的战斗 | 矿井目标完成、工具或资源不足、地图/战斗前置条件失败、用户取消 |
-| `fish` | 在钓鱼地点执行鱼竿状态机 | 钓鱼目标完成、没有鱼竿、鱼竿状态失败、用户取消 |
+| `mine` | 在当前矿井楼层持续处理可破坏石块 | 当前楼层没有可处理石块、地点或工具前置条件失败、用户取消 |
+| `fish` | 在当前地点附近水域反复执行鱼竿状态机 | 没有水域或鱼竿、鱼竿状态失败、用户取消 |
 
 这些模式共享目标选择、路径任务、工具或物品前置检查、失败重试、气泡通知和取消清理机制；每个模式只实现自己的目标扫描和成功条件。模式内部的每个 Tick 只推进有限状态，不阻塞游戏主线程，也不等待 CLI 或模型返回。
 
@@ -348,9 +350,9 @@ Fake Mod 已验证 follow 请求的字段、异步受理、pending 状态和 can
 
 ### `mine`
 
-`mine` 的复杂度高于农场模式，因为它同时包含地点进入、矿井楼层、矿石目标、梯子或出口、近战战斗、体力和生命管理。模式必须使用有限目标或停止条件，不能默认无限深入矿井。例如目标可以是“当前楼层寻找梯子”“处理当前楼层可见矿石”或“达到指定楼层”；每次启动都应在模式参数或 Runtime 计划中明确目标。
+当前 Demo 的 `mine` 只处理 Companion 已经所在的 `MineShaft` 楼层中的可破坏石块，不自动进入矿井、不自动跨楼层，也不把战斗和梯子逻辑伪装成已经完成的能力。后续若扩展到地点进入、矿井楼层、梯子或出口、近战战斗、体力和生命管理，仍需增加明确的停止条件和对应状态验证。
 
-模式可以拆成以下阶段：
+完整的矿井模式可以拆成以下阶段：
 
 1. **进入矿井**：确认 Companion 和 Shadow Farmer 位于允许的矿井地点，必要时通过游戏内有效入口或已验证的地点切换进入；
 2. **扫描楼层**：识别可用的石头、矿脉、梯子、升降梯和附近怪物，并根据当前目标选择优先级；
@@ -364,7 +366,7 @@ Fake Mod 已验证 follow 请求的字段、异步受理、pending 状态和 can
 
 ### `fish`
 
-`fish` 是对鱼竿状态机的持续封装。模式先确认钓鱼地点、水域目标和 Shadow Farmer 背包中的 `FishingRod`，然后在合法水域建立位置，调用抛竿逻辑并等待游戏事件推进，而不是由 CLI 轮询提交多次 `cast_fishing_rod`。
+`fish` 是对鱼竿状态机的持续封装。当前实现先在 Companion 所在地点附近寻找水域，移动到水边后反复调用已有的鱼竿状态机；它不是由 CLI 轮询提交多次 `cast_fishing_rod`。
 
 一次钓鱼循环至少包含：选择水域和站位 → 检查鱼竿、体力和时间 → 抛竿 → 等待咬钩 → 推进收线或小游戏状态 → 确认捕获、失败或取消 → 读取背包并决定是否继续下一次。捕获结果应通过背包变化、鱼竿状态或游戏返回值确认；只看到“抛竿成功”不能算作完成一条鱼。
 
@@ -387,7 +389,7 @@ Fake Mod 已验证 follow 请求的字段、异步受理、pending 状态和 can
 
 模式遇到可恢复问题时进入 `paused` 或 `waiting`，遇到不可恢复问题时进入 `failed`，并通过官方 `NPC.showTextAboveHead` 接口向玩家提示。模式内部的提示不是外部 `bubble` action，不创建新的 actor lease，也不应阻塞当前模式的 Tick；通知需要带原因和冷却时间，避免重复刷屏。
 
-Mod 配置可以提供可替换的文本模板。以下是扩展配置的设计示例，不是当前已经生效的配置项：
+Mod 配置可以提供可替换的文本模板。以下配置项当前已经生效：
 
 ```json
 {
@@ -694,6 +696,7 @@ snapshot-0.json → snapshot-1.json → snapshot-2.json
 | `say` | `text` |
 | `bubble` | `text`、`duration_ms` |
 | `follow` | `target_actor_id`、`distance` |
+| `start_mode` | `mode`；当前值为 `chop_trees`、`water_crops`、`harvest_crops`、`plant_crops`、`mine` 或 `fish` |
 | `cancel` | `target_request_id` |
 
 示例：
@@ -846,6 +849,12 @@ stardew-cli [--bridge-dir <bridge-directory>] <command>
 | `move <direction> --ticks <n>` | `move_relative` | `move right --ticks 15` | 异步返回 request ID |
 | `move-to --x <x> --y <y>` | `move_to` | `move-to --x 72 --y 18` | 异步返回 request ID |
 | `follow [--distance <tiles>]` | `follow` | `follow --distance 2` | 异步返回 request ID |
+| `chop-trees` | `start_mode` (`chop_trees`) | `chop-trees` | 异步返回 request ID |
+| `water-crops` | `start_mode` (`water_crops`) | `water-crops` | 异步返回 request ID |
+| `harvest-crops` | `start_mode` (`harvest_crops`) | `harvest-crops` | 异步返回 request ID |
+| `plant-crops` | `start_mode` (`plant_crops`) | `plant-crops` | 异步返回 request ID |
+| `mine` | `start_mode` (`mine`) | `mine` | 异步返回 request ID |
+| `fish` | `start_mode` (`fish`) | `fish` | 异步返回 request ID |
 | `face <direction>` | `face_direction` | `face left` | 异步返回 request ID |
 | `use-tool <tool> --x <x> --y <y>` | `use_tool` | `use-tool hoe --x 72 --y 18` | 异步返回 request ID |
 | `interact --x <x> --y <y>` | `interact` | `interact --x 72 --y 18` | 异步返回 request ID |
@@ -861,6 +870,8 @@ stardew-cli [--bridge-dir <bridge-directory>] <command>
 写命令当前固定控制 `companion-1`；读命令可以通过 `--actor-id` 指定协议中的 actor 字段，但 Mod Demo 目前只接受这个唯一 ID。
 
 Follow 默认把当前主农场主作为目标，命令成功后立即返回长期任务的 request ID。它不会在 CLI 中循环提交 `move_to`，跨地图自动 warp、同地图寻路和取消清理均由 Mod 完成。
+
+持续工作命令同样只提交一次 `start_mode`。农场模式在当前地点扫描并验证树木或 `HoeDirt` 状态，`mine` 只处理 Companion 当前所在矿井楼层的可破坏石块，`fish` 在当前地点附近水域反复推进鱼竿状态机。模式运行中的 `state`、当前目标和已完成数量通过 `snapshot-latest.json` 的 `companion.mode_info` 暴露；模式没有目标时结束，缺少工具、体力、种子、浇水壶水量或背包空间时暂停并显示配置气泡，使用 `cancel <request-id>` 结束暂停或运行中的模式。
 
 `say` 当前使用 Stardew Valley 的聊天框 API，显示一条带有 Companion 颜色的聊天消息。`bubble` 调用 Stardew Valley `NPC.showTextAboveHead` 官方接口，以气泡样式和指定时长显示文本；Mod 不再自行绘制背景、边框、文字或尾部，也不会打开 NPC DialogueBox 或产生语音输出。气泡的具体样式、布局和计时由游戏负责。
 
@@ -884,7 +895,7 @@ Mod 订阅以下事件：
 
 | 事件 | 行为 |
 | --- | --- |
-| `UpdateTicked` | 确保 Companion 存在、进入存档后首次写出 latest、优先领取取消请求、推进活动动作（包括 follow）、领取普通 pending 请求 |
+| `UpdateTicked` | 确保 Companion 存在、进入存档后首次写出 latest、优先领取取消请求、推进活动动作（包括 follow 和持续工作模式）、领取普通 pending 请求 |
 | `OneSecondUpdateTicked` | 按配置写 latest 和历史快照 |
 | `DayStarted` | 重置 shadow farmer 的睡眠状态和基础资源 |
 | `DayEnding` | 向 shadow farmer 发出睡眠就绪信号 |
@@ -902,6 +913,7 @@ Mod 订阅以下事件：
 - `set_auto_combat` 的启用状态绑定到活动任务，收到取消后关闭自动战斗循环；
 - `bubble` 在显示期间保留 request ID，收到取消后调用 Stardew Valley `NPC.clearTextAboveHead` 清除官方气泡；
 - `follow` 在每个 Tick 检查玩家位置，按地图和距离选择 warp、寻路或等待，收到取消后清除路径控制器并结束任务；
+- `start_mode` 在每个 Tick 扫描当前地点的目标，分阶段执行移动、工具/鱼竿动作和结果验证；暂停状态保留 request ID，收到取消后清除路径和鱼竿状态并结束任务；
 - 一次性动作在调用游戏 API 前检查取消；如果 API 已返回，则动作视为已完成，取消只能返回目标已完成，不能回滚游戏副作用；
 - 只读动作同样登记 request ID，读取开始前可以取消，读取完成后取消不再产生效果。
 
@@ -913,7 +925,7 @@ Mod 订阅以下事件：
 
 - 世界：年份、季节、日期、时间、当前地点和天气；
 - 主农场主：名字、地点、tile、朝向、生命、体力和金钱；
-- Companion：地点、tile、朝向、生命、体力、背包数量、direct 模式、忙碌状态、当前动作、自动战斗开关和能力列表。
+- Companion：地点、tile、朝向、生命、体力、背包数量、模式、忙碌状态、当前动作、自动战斗开关、持续模式详情和能力列表。
 
 `observe` 的局部扫描从 Companion 所在 `GameLocation` 读取：
 
@@ -970,6 +982,9 @@ Fake Mod 不能验证 SMAPI API、游戏碰撞、实际寻路、工具动画、�
 | `follow_target_unavailable` | Follow 运行时主农场主或世界不可用 | Follow 任务失败并清理状态 |
 | `follow_warp_failed` | Follow 找不到跨地图或应急 warp 的安全位置 | Follow 任务失败并清理状态 |
 | `follow_path_blocked` | Follow 无法建立路径且应急 warp 也失败 | Follow 任务失败并清理状态 |
+| `unsupported_mode` | 持续模式名称不受支持 | `start_mode` 请求失败 |
+| `tool_use_failed`、`plant_failed`、`harvest_failed` | 持续模式当前目标动作不可用或结果未确认 | 模式暂停并通过官方气泡提示 |
+| `no_seed`、`no_water`、`no_fishing_rod`、`inventory_full` | 持续模式缺少必要资源 | 模式暂停并通过官方气泡提示 |
 | `cancelled_before_start` | 目标仍在 `pending`，尚未调用游戏 API | 目标结果为 `cancelled` 并归档 |
 | `cancelled_by_request` | 活动动作在安全点响应取消 | 目标结果为 `cancelled` 并完成动作清理 |
 | `request_not_found` | Bridge 中不存在目标 request | `cancel` 自身失败 |
@@ -1050,7 +1065,8 @@ Mod 项目目标框架为 `net6.0`。Mac 可以安装 .NET SDK 编译 C# 工程�
 5. 依次验证 `status`、`ping`、`observe`、`inventory`、`move-to`、`use-tool` 和 `interact`；
 6. 对传送、战斗、钓鱼和自动战斗分别在满足游戏前置条件的场景验证；
 7. 在 Windows 真机中验证 `follow`、跨地图自动 warp、路径阻塞和 `cancel`；
-8. 用 `snapshot list`、`doctor` 和 `request/result show` 检查文件轮转与请求生命周期。
+8. 在有树木、耕地、矿井石块和水域的场景分别验证六种持续模式、暂停气泡、状态确认和 `cancel`；
+9. 用 `snapshot list`、`doctor` 和 `request/result show` 检查文件轮转与请求生命周期。
 
 可以在 Windows 真机验证后，把 Bridge 目录中的 JSON 复制到 Mac，用 CLI 做离线解析、查询和快照轮转测试；这些离线检查不能替代下一次真实游戏验证。
 
@@ -1076,7 +1092,7 @@ Mod 项目目标框架为 `net6.0`。Mac 可以安装 .NET SDK 编译 C# 工程�
 | `set_auto_combat` | `set-auto-combat` |
 | `eat_item` | `eat-item` |
 
-对应关系只表示动作语义，不表示两边协议字段、伴侣数量、资源配置或自主模式完全相同。当前 Demo 有意只创建一个 `companion-1`，已实现 direct 控制和 Follow；没有实现参考项目的 farm、mine、fish 等自主模式，也没有把 Companion 注册为原版联机 Farmhand。
+对应关系只表示动作语义，不表示两边协议字段、伴侣数量、资源配置或自主模式完全相同。当前 Demo 有意只创建一个 `companion-1`，已实现 direct 控制、Follow 和本节所述的本地持续模式；没有把 Companion 注册为原版联机 Farmhand。
 
 参考项目和本 Demo 都采用“可见 NPC + shadow farmer”的职责分离：NPC 负责可见位置和寻路，shadow farmer 负责调用 Farmer/Tool/Item 等游戏机制。参考项目的 Follow 会在同地图内寻路，在玩家切换地图时将 NPC 放到玩家所在地图；本 Demo 的 Follow 实现采用相同的 Mod 内自动 warp 思路。由于 shadow farmer 不是原版网络玩家，`warp` 是 Mod 内部的显式对象移动，不会创建第二个本地游戏客户端，也不会把它描述成真实联机角色。
 
@@ -1084,7 +1100,7 @@ Mod 项目目标框架为 `net6.0`。Mac 可以安装 .NET SDK 编译 C# 工程�
 
 - 只支持一个 actor：`companion-1`；
 - 直控入口是 CLI，不是 MCP，不是游戏内按键；
-- Follow 当前只支持跟随主农场主，目标 actor、路径策略和距离范围仍是固定约束；当前没有农场、采矿或钓鱼调度器；
+- Follow 当前只支持跟随主农场主，目标 actor、路径策略和距离范围仍是固定约束；持续模式只处理当前地点可扫描的目标，不负责通用任务规划；
 - `warp` 可以把 Companion 显式移动到另一个已加载地点；Follow 会复用同一类对象同步逻辑实现玩家换地图后的自动 warp；
 - Companion 是否拥有鱼竿、武器以及动作是否可执行，取决于 shadow farmer 的实际背包和游戏前置条件；
 - `say` 只写入游戏聊天框；`bubble` 只显示临时头顶气泡，不会打开 NPC DialogueBox；
@@ -1119,9 +1135,13 @@ Mod 项目目标框架为 `net6.0`。Mac 可以安装 .NET SDK 编译 C# 工程�
 - [x] Mod 增加 FollowTask，在同地图内按 Tick 寻路并在跨地图时同步 warp NPC 与 shadow farmer；
 - [x] Follow 复用统一 cancel 机制，并在快照中写出 follow 目标和运行状态；
 - [x] Fake Mod 覆盖 follow 请求、pending 状态和 cancel 关联；
+- [x] CLI 支持 `chop-trees`、`water-crops`、`harvest-crops`、`plant-crops`、`mine` 和 `fish` 持续模式入口；
+- [x] Mod 在逐 Tick 状态机中执行持续模式，并在快照中暴露模式状态、目标和完成数量；
+- [x] 持续模式支持工具、种子、水量、体力和背包前置检查、官方气泡通知、有限重试和统一 cancel 清理；
 - [ ] 为工具和攻击增加统一的 Companion ActionPresentation 状态，不新增美术素材；
 - [ ] 为 `hoe`、`pickaxe`、`axe`、`watering_can`、`sword`/`weapon` 和 `cast_fishing_rod` 增加近似动作表现；
 - [ ] 自动战斗每次成功攻击复用近战表现，并在取消和生命周期清理时结束表现状态；
 - [ ] Windows + SMAPI 真实游戏中验证 follow 的同地图寻路、跨地图 warp、路径阻塞和取消；
 - [ ] Windows + SMAPI 真实游戏中完成全部工具动作表现的阶段验证；
-- [ ] 在真实游戏中验证不同地点、工具、作物、箱子、怪物和鱼竿状态机的版本兼容性。
+- [ ] 在真实游戏中验证不同地点、工具、作物、箱子、怪物和鱼竿状态机的版本兼容性；
+- [ ] 扩展 `mine` 的入口、梯子、战斗和安全停止策略，并增加有界 Runtime 参数。
