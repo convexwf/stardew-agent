@@ -53,7 +53,7 @@ internal sealed class CompanionController
 
     public bool IsFishingActive => _fishingActive;
 
-    public bool HasSpeechBubble => _visual?.HasSpeechBubble == true;
+    public bool HasSpeechBubble => _visual?.HasTextAboveHead == true;
 
     public string? CurrentAction => _activeMove?.Action
         ?? (_fishingActive ? "cast_fishing_rod" : null)
@@ -134,7 +134,6 @@ internal sealed class CompanionController
             return null;
 
         SyncShadow();
-        _visual.TickSpeechBubble();
         TickAutoCombat();
 
         if (_activeMove is null)
@@ -542,7 +541,7 @@ internal sealed class CompanionController
 
     public void ClearSpeechBubble()
     {
-        _visual?.ClearSpeechBubble();
+        _visual?.ClearTextAboveHead();
     }
 
     public bool TryFaceDirection(string direction, out ErrorDetail? error)
@@ -813,7 +812,7 @@ internal sealed class CompanionController
             return false;
         }
 
-        _visual.ShowSpeechBubble(text, durationMs);
+        _visual.ShowTextAboveHead(text, durationMs);
         return true;
     }
 
@@ -931,7 +930,7 @@ internal sealed class CompanionController
     public void Cleanup()
     {
         CancelMove();
-        _visual?.ClearSpeechBubble();
+        _visual?.ClearTextAboveHead();
         if (_visual is not null)
             _visual.currentLocation?.characters.Remove(_visual);
         _visual = null;

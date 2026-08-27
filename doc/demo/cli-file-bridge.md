@@ -639,7 +639,7 @@ stardew-cli [--bridge-dir <bridge-directory>] <command>
 
 Follow 默认把当前主农场主作为目标，命令成功后立即返回长期任务的 request ID。它不会在 CLI 中循环提交 `move_to`，跨地图自动 warp、同地图寻路和取消清理均由 Mod 完成。
 
-`say` 当前使用 Stardew Valley 的聊天框 API，显示一条带有 Companion 颜色的聊天消息。`bubble` 使用 Companion NPC 的世界绘制层，在角色头顶显示带文字换行和尾部指示的临时气泡；它不会打开 NPC DialogueBox，也不产生语音输出。
+`say` 当前使用 Stardew Valley 的聊天框 API，显示一条带有 Companion 颜色的聊天消息。`bubble` 调用 Stardew Valley `NPC.showTextAboveHead` 官方接口，以气泡样式和指定时长显示文本；Mod 不再自行绘制背景、边框、文字或尾部，也不会打开 NPC DialogueBox 或产生语音输出。气泡的具体样式、布局和计时由游戏负责。
 
 `move_relative` 的 `ticks` 由 CLI 限制为 `1..=30`。`observe` 的 `radius` 由 CLI 和 Mod 共同限制为 `1..=16`。限制是为了避免单个请求无限占用游戏 tick 或产生过大的观察结果。
 
@@ -677,7 +677,7 @@ Mod 订阅以下事件：
 - `move_relative` 和 `move_to` 由路径控制器逐 Tick 推进，收到取消后停止控制器，保留当前位置并为原请求写入 `cancelled`；
 - `cast_fishing_rod` 保存鱼竿状态机对应的 request ID，收到取消后退出钓鱼状态并清理相关状态；
 - `set_auto_combat` 的启用状态绑定到活动任务，收到取消后关闭自动战斗循环；
-- `bubble` 在显示期间保留 request ID，收到取消后清除气泡；
+- `bubble` 在显示期间保留 request ID，收到取消后调用 Stardew Valley `NPC.clearTextAboveHead` 清除官方气泡；
 - `follow` 在每个 Tick 检查玩家位置，按地图和距离选择 warp、寻路或等待，收到取消后清除路径控制器并结束任务；
 - 一次性动作在调用游戏 API 前检查取消；如果 API 已返回，则动作视为已完成，取消只能返回目标已完成，不能回滚游戏副作用；
 - 只读动作同样登记 request ID，读取开始前可以取消，读取完成后取消不再产生效果。
