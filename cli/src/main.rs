@@ -9,6 +9,8 @@ use stardew_cli::{
     protocol::{ActionRequestPayload, Direction, ToolKind, COMPANION_ID},
 };
 
+const INFO_REQUEST_TIMEOUT_MS: u64 = 30_000;
+
 #[derive(Debug, Parser)]
 #[command(name = "stardew-cli", version, about = "Stardew Agent CLI bridge")]
 struct Cli {
@@ -211,11 +213,11 @@ fn run() -> Result<()> {
         Command::World => print_section(&bridge, "game"),
         Command::Player => print_section(&bridge, "player"),
         Command::Companion { actor_id } => print_companion(&bridge, &actor_id),
-        Command::Inventory { actor_id } => submit_and_print(
+        Command::Inventory { actor_id } => send_and_wait_and_print(
             &bridge,
             ActionRequestPayload::GetInventory { actor_id },
         ),
-        Command::Observe { actor_id, radius } => submit_and_print(
+        Command::Observe { actor_id, radius } => send_and_wait_and_print(
             &bridge,
             ActionRequestPayload::Observe { actor_id, radius },
         ),
@@ -257,7 +259,7 @@ fn run() -> Result<()> {
             older_than_seconds,
             dry_run,
         } => print_json(&bridge.cleanup(older_than_seconds, dry_run)?),
-        Command::Ping => submit_and_print(
+        Command::Ping => send_and_wait_and_print(
             &bridge,
             ActionRequestPayload::Ping {
                 actor_id: COMPANION_ID.to_owned(),
@@ -411,6 +413,11 @@ fn print_optional(value: Option<Value>, kind: &str) -> Result<()> {
 fn submit_and_print(bridge: &Bridge, payload: ActionRequestPayload) -> Result<()> {
     let receipt = bridge.submit_receipt(payload)?;
     print_json(&receipt)
+}
+
+fn send_and_wait_and_print(bridge: &Bridge, payload: ActionRequestPayload) -> Result<()> {
+    let result = bridge.send_and_wait(payload, INFO_REQUEST_TIMEOUT_MS)?;
+    print_result(&result)
 }
 
 fn wait_and_print(bridge: &Bridge, request_id: &str, timeout_ms: u64) -> Result<()> {

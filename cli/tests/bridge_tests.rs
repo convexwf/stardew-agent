@@ -420,10 +420,45 @@ fn cli_defaults_to_bridge_next_to_executable() {
 }
 
 #[test]
-fn cli_writes_actions_through_fake_mod() {
+fn cli_reads_information_commands_synchronously() {
     let _lock = fake_mod_lock();
     for (arguments, action_name) in [
         (vec!["ping"], "ping"),
+        (vec!["observe", "--radius", "8"], "observe"),
+        (vec!["inventory"], "get_inventory"),
+    ] {
+        let bridge = temp_bridge();
+        bridge.ensure_layout().unwrap();
+        let child = Command::new(env!("CARGO_BIN_EXE_fake-mod"))
+            .arg("--bridge-dir")
+            .arg(&bridge.root)
+            .arg("--latest-interval-ms")
+            .arg("50")
+            .arg("--once")
+            .spawn()
+            .unwrap();
+
+        let mut cli = Command::new(env!("CARGO_BIN_EXE_stardew-cli"));
+        cli.arg("--bridge-dir").arg(&bridge.root);
+        for argument in arguments {
+            cli.arg(argument);
+        }
+        let output = cli.output().unwrap();
+        let mut child = child;
+        assert!(output.status.success(), "CLI stderr: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(child.wait().unwrap().success());
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["payload"]["action"], action_name);
+        assert_eq!(result["payload"]["status"], "succeeded");
+        assert!(result.get("request_id").is_some());
+        fs::remove_dir_all(bridge.root).unwrap();
+    }
+}
+
+#[test]
+fn cli_writes_game_actions_asynchronous_receipts() {
+    let _lock = fake_mod_lock();
+    for (arguments, action_name) in [
         (vec!["move", "right", "--ticks", "10"], "move_relative"),
         (vec!["say", "hello from the CLI"], "say"),
         (vec!["bubble", "hello above the Companion"], "bubble"),
