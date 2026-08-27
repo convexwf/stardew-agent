@@ -58,6 +58,10 @@ internal sealed class CompanionController
     private const int ModeVerificationDelay = 12;
     private const int ModeMaxRetries = 3;
     private const int ModeBubbleCooldownTicks = 300;
+    private const int SwingPresentationTicks = 20;
+    private const int MeleePresentationTicks = 18;
+    private const int WaterPresentationTicks = 26;
+    private const int CastPresentationTicks = 30;
 
     private static readonly HashSet<string> SupportedModes = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -167,6 +171,7 @@ internal sealed class CompanionController
 
         SyncShadow();
         TickAutoCombat();
+        TickActionPresentation();
 
         if (_activeMove is null)
             return null;
@@ -320,6 +325,7 @@ internal sealed class CompanionController
         if (!_followActive || _followRequestId is null)
             return null;
 
+        ClearActionPresentation();
         var completion = new ActionCompletion
         {
             RequestId = _followRequestId,
@@ -385,6 +391,7 @@ internal sealed class CompanionController
             error = new ErrorDetail { Code = "follow_warp_failed", Message = "the companion or player is unavailable" };
             return false;
         }
+        ClearActionPresentation();
 
         var target = FindFollowTargetTile(location, new Point((int)Game1.player.Tile.X, (int)Game1.player.Tile.Y), _followDistance);
         if (target is null)
@@ -886,7 +893,7 @@ internal sealed class CompanionController
         error = null;
         if (_modeName == "chop_trees" && GetTreeAt(_modeTargetTile) is Tree treeBefore)
             _modeBeforeHealth = treeBefore.health.Value;
-        if (!UseToolAt(new Vector2(_modeTargetTile.X, _modeTargetTile.Y), toolType))
+        if (!UseToolAt(_modeRequestId ?? "unknown", new Vector2(_modeTargetTile.X, _modeTargetTile.Y), toolType))
         {
             error = new ErrorDetail { Code = "tool_use_failed", Message = $"failed to use {toolType.Name} at the target" };
             return false;
@@ -1083,6 +1090,7 @@ internal sealed class CompanionController
     {
         if (_visual is not null)
             _visual.controller = null;
+        ClearActionPresentation();
         _fishingActive = false;
         _fishingRequestId = null;
         _modeActive = false;
@@ -1200,6 +1208,7 @@ internal sealed class CompanionController
             return null;
 
         var requestId = _fishingRequestId;
+        ClearActionPresentation();
         _fishingActive = false;
         _fishingRequestId = null;
         return new ActionCompletion
@@ -1241,7 +1250,7 @@ internal sealed class CompanionController
         return true;
     }
 
-    public bool TryUseTool(string toolName, int x, int y, out object? data, out ErrorDetail? error)
+    public bool TryUseTool(string requestId, string toolName, int x, int y, out object? data, out ErrorDetail? error)
     {
         data = null;
         error = null;
@@ -1266,10 +1275,13 @@ internal sealed class CompanionController
             return false;
         }
 
-        var success = UseToolAt(new Vector2(x, y), toolType);
+        var success = UseToolAt(requestId, new Vector2(x, y), toolType);
         data = new { tool = toolName, tile = new TileDto { X = x, Y = y }, used = success };
         if (!success)
+        {
+            ClearActionPresentation();
             error = new ErrorDetail { Code = "tool_use_failed", Message = $"failed to use {toolName} at ({x},{y})" };
+        }
         return success;
     }
 
@@ -1382,6 +1394,7 @@ internal sealed class CompanionController
             return false;
         }
 
+        ClearActionPresentation();
         _visual!.currentLocation?.characters.Remove(_visual);
         _visual.controller = null;
         var position = new Vector2(x * Game1.tileSize, y * Game1.tileSize);
@@ -1396,7 +1409,7 @@ internal sealed class CompanionController
         return true;
     }
 
-    public bool TryAttack(out object? data, out ErrorDetail? error)
+    public bool TryAttack(string requestId, out object? data, out ErrorDetail? error)
     {
         data = null;
         error = null;
@@ -1410,6 +1423,7 @@ internal sealed class CompanionController
         var monster = FindNearestMonster();
         if (weapon is null || monster is null)
         {
+            ClearActionPresentation();
             error = new ErrorDetail { Code = "no_attack_target", Message = weapon is null ? "the companion has no weapon" : "no monster in range" };
             data = new { attacked = false };
             return false;
@@ -1420,11 +1434,13 @@ internal sealed class CompanionController
         {
             var toolLocation = _shadow.GetToolLocation(true);
             weapon.DoDamage(_shadow.currentLocation, (int)toolLocation.X, (int)toolLocation.Y, _shadow.FacingDirection, 1, _shadow);
+            StartToolPresentation(requestId, weapon, monster.Tile, CompanionNpc.MeleePresentation);
             data = new { attacked = true, monster = monster.Name, tile = new TileDto { X = (int)monster.Tile.X, Y = (int)monster.Tile.Y } };
             return true;
         }
         catch (Exception exception)
         {
+            ClearActionPresentation();
             error = new ErrorDetail { Code = "attack_failed", Message = exception.Message };
             return false;
         }
@@ -1450,6 +1466,15 @@ internal sealed class CompanionController
         {
             rod.beginUsing(_shadow.currentLocation, (int)_shadow.Position.X, (int)_shadow.Position.Y, _shadow);
             rod.castingPower = 1f;
+            var offset = _shadow.FacingDirection switch
+            {
+                0 => new Point(0, -2),
+                1 => new Point(2, 0),
+                2 => new Point(0, 2),
+                _ => new Point(-2, 0)
+            };
+            var castTile = new Vector2(_shadow.Tile.X + offset.X, _shadow.Tile.Y + offset.Y);
+            StartToolPresentation(requestId, rod, castTile, CompanionNpc.CastPresentation);
             _fishingActive = true;
             _fishingRequestId = requestId;
             data = new { cast = true };
@@ -1457,6 +1482,7 @@ internal sealed class CompanionController
         }
         catch (Exception exception)
         {
+            ClearActionPresentation();
             error = new ErrorDetail { Code = "fishing_failed", Message = exception.Message };
             return false;
         }
@@ -1596,6 +1622,7 @@ internal sealed class CompanionController
     public void WakeUp()
     {
         _shadow?.WakeUp();
+        ClearActionPresentation();
         _fishingActive = false;
         _fishingRequestId = null;
         ClearModeState();
@@ -1606,6 +1633,7 @@ internal sealed class CompanionController
     {
         CancelMove();
         _visual?.ClearTextAboveHead();
+        ClearActionPresentation();
         if (_visual is not null)
             _visual.currentLocation?.characters.Remove(_visual);
         _visual = null;
@@ -1679,7 +1707,7 @@ internal sealed class CompanionController
         return offset.X != int.MinValue;
     }
 
-    private bool UseToolAt(Vector2 tile, Type toolType)
+    private bool UseToolAt(string requestId, Vector2 tile, Type toolType)
     {
         if (_shadow is null || _shadow.Stamina <= 0)
             return false;
@@ -1695,10 +1723,13 @@ internal sealed class CompanionController
             {
                 var toolLocation = _shadow.GetToolLocation(true);
                 weapon.DoDamage(_shadow.currentLocation, (int)toolLocation.X, (int)toolLocation.Y, _shadow.FacingDirection, 1, _shadow);
+                StartToolPresentation(requestId, weapon, tile, CompanionNpc.MeleePresentation);
             }
             else
             {
                 tool.DoFunction(_shadow.currentLocation, (int)(tile.X * Game1.tileSize), (int)(tile.Y * Game1.tileSize), 1, _shadow);
+                var kind = tool is WateringCan ? CompanionNpc.WaterPresentation : CompanionNpc.SwingPresentation;
+                StartToolPresentation(requestId, tool, tile, kind);
             }
             _shadow.checkForExhaustion(oldStamina);
             return true;
@@ -1706,8 +1737,64 @@ internal sealed class CompanionController
         catch (Exception error)
         {
             _monitor.Log($"Tool use failed: {error.Message}", LogLevel.Debug);
+            ClearActionPresentation();
             return false;
         }
+    }
+
+    private void StartToolPresentation(string requestId, Tool tool, Vector2 targetTile, string kind)
+    {
+        if (_visual is null || _shadow is null)
+            return;
+
+        var facing = _shadow.FacingDirection;
+        _visual.FacingDirection = facing;
+        var target = new Point((int)targetTile.X, (int)targetTile.Y);
+        var (texture, sourceRect) = GetToolIcon(tool);
+        var ticks = kind switch
+        {
+            CompanionNpc.MeleePresentation => MeleePresentationTicks,
+            CompanionNpc.WaterPresentation => WaterPresentationTicks,
+            CompanionNpc.CastPresentation => CastPresentationTicks,
+            _ => SwingPresentationTicks
+        };
+        _visual.ShowActionPresentation(requestId, kind, tool.Name, facing, target, ticks, texture, sourceRect);
+        _monitor.Log(
+            $"Action presentation start: request={requestId} kind={kind} tool={tool.Name} "
+            + $"facing={facing} tile=({target.X},{target.Y}) ticks={ticks}.",
+            LogLevel.Info);
+    }
+
+    private static (Texture2D? Texture, Rectangle SourceRect) GetToolIcon(Tool tool)
+    {
+        try
+        {
+            var sourceRect = Game1.getSourceRectForStandardTileSheet(Game1.toolSpriteSheet, tool.IndexOfMenuItemView, 16, 16);
+            return (Game1.toolSpriteSheet, sourceRect);
+        }
+        catch (Exception)
+        {
+            return (null, Rectangle.Empty);
+        }
+    }
+
+    private void TickActionPresentation()
+    {
+        if (_visual is null)
+            return;
+        var hadPresentation = _visual.HasActionPresentation;
+        _visual.TickActionPresentation();
+        if (hadPresentation && !_visual.HasActionPresentation)
+            _monitor.Log("Action presentation ended.", LogLevel.Debug);
+    }
+
+    private void ClearActionPresentation()
+    {
+        if (_visual is null)
+            return;
+        if (_visual.HasActionPresentation)
+            _monitor.Log("Action presentation cleared.", LogLevel.Debug);
+        _visual.ClearActionPresentation();
     }
 
     private Monster? FindNearestMonster(float range = 256f)
@@ -1738,7 +1825,7 @@ internal sealed class CompanionController
                 _autoCombatCooldown--;
             return;
         }
-        TryAttack(out _, out _);
+        TryAttack("auto_combat", out _, out _);
         _autoCombatCooldown = 15;
     }
 

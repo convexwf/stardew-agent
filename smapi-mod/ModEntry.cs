@@ -459,7 +459,7 @@ internal sealed class ModEntry : Mod
         }
         object? data = null;
         ErrorDetail? error = null;
-        var success = _companion is not null && _companion.TryUseTool(payload.Tool, payload.X, payload.Y, out data, out error);
+        var success = _companion is not null && _companion.TryUseTool(request.RequestId!, payload.Tool, payload.X, payload.Y, out data, out error);
         WriteActionResult(request.RequestId!, "use_tool", actorId, success, data, error);
         Archive(processingPath);
     }
@@ -536,7 +536,7 @@ internal sealed class ModEntry : Mod
         }
         object? data = null;
         ErrorDetail? error = null;
-        var success = _companion is not null && _companion.TryAttack(out data, out error);
+        var success = _companion is not null && _companion.TryAttack(request.RequestId!, out data, out error);
         WriteActionResult(request.RequestId!, "attack", actorId, success, data, error);
         Archive(processingPath);
     }
