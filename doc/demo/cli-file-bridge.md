@@ -5,9 +5,9 @@
 | 项目 | 内容 |
 | --- | --- |
 | **文档标题** | CLI 工具系统通信 Demo 技术实现方案 |
-| **文档版本** | v0.16 |
+| **文档版本** | v0.17 |
 | **创建日期** | 2026-08-23 |
-| **更新日期** | 2026-08-26 |
+| **更新日期** | 2026-08-27 |
 | **文档类型** | 技术实现方案 |
 | **参考资料** | [SMAPI Mod 结构](https://wiki.stardewvalley.net/Modding:Modder_Guide/APIs/Mod_structure)、[SMAPI Mod package](https://github.com/Pathoschild/SMAPI/blob/develop/docs/technical/mod-package.md)、[StardewMCP](https://github.com/Hunter-Thompson/stardew-mcp/tree/3ca54bbfc1d446eeb06d822a74c92cd14df82b93)、[StardewValley-MCP](https://github.com/amarisaster/StardewValley-MCP) |
 
@@ -15,6 +15,7 @@
 
 - [文档定位](#文档定位)
 - [当前实现范围](#当前实现范围)
+- [工具动作表现方案](#工具动作表现方案)
 - [Follow 设计与实现](#follow-设计与实现)
 - [数据交互链路](#数据交互链路)
 - [动作生命周期与取消](#动作生命周期与取消)
@@ -55,7 +56,7 @@ Companion 由两个对象组成：
 
 Companion 的逻辑名称固定为 `companion-1`，这个名称同时用于 CLI 的 `actor_id`、状态扫描和动作路由，不能为了修复游戏资源加载而改成原版 NPC 名称。
 
-当前 Demo 尚未提供自定义头像资源。由于 Stardew Valley 会根据 NPC 名称尝试加载 `Portraits/companion-1`，Mod 在 SMAPI 的 `AssetRequested` 事件中临时将该资源映射到游戏已有的 `Portraits/Abigail`，并向 `Data/Characters` 注入最小的 Companion 角色数据，确保游戏将其作为有效 NPC 处理。生成时会优先选择玩家相邻且可通行的 tile；绘制时使用自定义 NPC 绘制逻辑。这些都是为了先验证 Companion 的生成和通信链路，不表示 Companion 的最终人物形象，也不改变其逻辑身份。
+当前 Demo 尚未提供自定义头像资源。由于 Stardew Valley 会根据 NPC 名称尝试加载 `Portraits/companion-1`，Mod 在 SMAPI 的 `AssetRequested` 事件中临时将该资源映射到游戏已有的 `Portraits/Abigail`，并向 `Data/Characters` 注入最小的 Companion 角色数据，确保游戏将其作为有效 NPC 处理。生成时会优先选择玩家相邻且可通行的 tile；绘制使用原版 `NPC` 默认绘制逻辑，头顶气泡也由游戏官方接口和绘制流程负责。这些都是为了先验证 Companion 的生成和通信链路，不表示 Companion 的最终人物形象，也不改变其逻辑身份。
 
 后续设计自己的头像时，只需将该映射的返回资源替换为 Mod 自带的 portrait 文件，并保留 `Portraits/companion-1` 这个资源键；如果替换行走动画，也应以同样方式注册 `Characters/companion-1`，不改动 CLI 和 Bridge 协议。
 
@@ -86,6 +87,53 @@ Companion 的逻辑名称固定为 `companion-1`，这个名称同时用于 CLI 
 | 控制 | `cancel` | 取消任意尚未完成的 action；不回滚已经完成的游戏副作用 |
 
 `use_tool`、`attack` 和 `cast_fishing_rod` 的命令入口已经实现，但实际是否成功取决于 Companion shadow farmer 当前是否拥有相应工具、目标是否存在以及游戏运行时前置条件。失败会通过结构化 `error` 返回，不会伪造成功。
+
+工具动作的游戏效果已经实现，工具挥动和命中特效按照下面的[工具动作表现方案](#工具动作表现方案)补充；在该方案完成前，当前版本可能出现游戏对象已经改变但可见 Companion 没有对应工具动画的情况。
+
+## 工具动作表现方案
+
+### 范围和目标
+
+本方案只增加可见的近似表现，不新增美术素材，也不改变 `NPC + Shadow Farmer` 的执行架构。Shadow Farmer 继续负责调用游戏 API 和产生真实的游戏效果，Companion NPC 负责在画面中表现动作。该表现不追求复刻原版 Farmer 的完整工具动画，只需要让玩家能看到 Companion 正在使用对应工具以及动作命中的大致方向。
+
+当前工具动作覆盖以下入口：
+
+| 入口 | 工具或动作 | 近似表现 |
+| --- | --- | --- |
+| `use_tool` | `hoe`、`pickaxe`、`axe` | 按 Companion 朝向播放短暂挥动，叠加现有工具图像或代码生成的挥动轨迹，并以目标 tile 作为命中位置 |
+| `use_tool` | `watering_can` | 按朝向绘制短暂水流/水滴轨迹，并以目标 tile 作为作用范围 |
+| `use_tool` | `sword`、`weapon` | 播放短暂近战挥动和命中闪光；实际伤害仍由 Shadow Farmer 的武器 API 产生 |
+| `attack` | Shadow Farmer 背包中的近战武器 | 使用实际选中的武器类型和朝向播放近战挥动；没有武器或目标时不播放成功特效 |
+| `cast_fishing_rod` | 鱼竿 | 播放抛竿的短暂表现；等待咬钩、收线和捕获仍由现有鱼竿状态机负责 |
+| `set_auto_combat` | 连续近战攻击 | 每次自动攻击成功时触发一段独立的近战表现，不把整个自动战斗循环绘制成一个长动画 |
+
+### 无素材实现
+
+实现不创建 `smapi-mod/assets/`，也不修改 Mod 产物的素材打包配置。实现层使用游戏运行时已有的工具或武器图像；无法直接复用的部分使用 `SpriteBatch` 绘制的几何轨迹、方向性弧线、水滴和命中闪光表示。表现资源的缺失不能阻止 Shadow Farmer 执行真实工具效果。
+
+`CompanionNpc` 的绘制入口保留原版 `base.draw()`，以继续使用官方 NPC 气泡渲染；工具表现作为独立的低层级覆盖绘制，不重新实现气泡、NPC 文本或 NPC 基础精灵绘制。工具表现结束后清除临时状态，不改变 NPC 的默认资源和 `companion-1` 逻辑名称。
+
+### 表现状态和时序
+
+Mod 为可见 Companion 保存一个短生命周期的 `ActionPresentation`，至少包含 `request_id`、表现类型、工具类型、朝向、目标 tile、开始 Tick 和剩余 Tick。`use_tool`、`attack` 和自动战斗在确定执行主体和方向后创建表现状态；鱼竿动作使用独立的阶段字段，避免把等待咬钩误当成挥动动画。
+
+游戏副作用和表现状态分别完成：Shadow Farmer 的游戏 API 成功或失败决定 action result，表现状态只负责短暂显示。一次性 action 的取消窗口仍然位于游戏 API 调用前；API 已执行后，取消不能回滚世界变化，也不伪造失败结果。若表现状态仍在播放，Mod 只清理剩余的本地表现状态。
+
+### 多人扩展边界
+
+单机 Demo 中表现事件直接在执行动作的 Mod 实例本地播放。若以后启用多人观看，房主仍是唯一的 Shadow Farmer 执行者，并广播包含 `request_id`、表现类型、工具类型、朝向、目标 tile、开始序号和持续时间的短时事件；其他客户端只播放 Companion 表现，不重复执行工具 API。表现事件是瞬时通知，不能替代持久的游戏世界状态同步。
+
+### 实现步骤
+
+1. 在 Companion 控制器中增加统一的 `ActionPresentation` 状态和开始、推进、结束方法，不为每种工具复制一套计时循环。
+2. 在 `use_tool` 和 `attack` 的动作入口中解析工具类型、朝向和目标 tile，在 Shadow Farmer 调用游戏 API 前后设置表现状态；失败路径清理表现状态。
+3. 在 Companion 的绘制入口中保留 `base.draw()`，再按表现状态叠加现有工具图像或几何特效；表现绘制不能覆盖官方 NPC 气泡。
+4. 在 `cast_fishing_rod` 中单独推进抛竿阶段，在自动战斗每次成功攻击时复用近战表现；不把鱼竿等待阶段和自动战斗循环阻塞在绘制逻辑里。
+5. 在取消、读档、切换地点、返回标题和新的一天等清理路径中结束表现状态，并用 Windows + SMAPI 逐个工具验证。
+
+### 验证范围
+
+Windows + SMAPI 实机需要分别验证每个入口的成功和失败路径：五类 `use_tool` 工具、`attack`、`cast_fishing_rod` 以及自动战斗中的连续攻击，并检查朝向、目标 tile、动作结束、取消和地图切换后的清理行为。参考程序集和 Fake Mod 只能验证编译、协议和状态链路，不能验证工具动画的实际视觉效果。
 
 ## Follow 设计与实现
 
@@ -895,6 +943,9 @@ Mod 项目目标框架为 `net6.0`。Mac 可以安装 .NET SDK 编译 C# 工程�
 - [x] Mod 增加 FollowTask，在同地图内按 Tick 寻路并在跨地图时同步 warp NPC 与 shadow farmer；
 - [x] Follow 复用统一 cancel 机制，并在快照中写出 follow 目标和运行状态；
 - [x] Fake Mod 覆盖 follow 请求、pending 状态和 cancel 关联；
+- [ ] 为工具和攻击增加统一的 Companion ActionPresentation 状态，不新增美术素材；
+- [ ] 为 `hoe`、`pickaxe`、`axe`、`watering_can`、`sword`/`weapon` 和 `cast_fishing_rod` 增加近似动作表现；
+- [ ] 自动战斗每次成功攻击复用近战表现，并在取消和生命周期清理时结束表现状态；
 - [ ] Windows + SMAPI 真实游戏中验证 follow 的同地图寻路、跨地图 warp、路径阻塞和取消；
-- [ ] Windows + SMAPI 真实游戏中完成全部动作的阶段验证；
+- [ ] Windows + SMAPI 真实游戏中完成全部工具动作表现的阶段验证；
 - [ ] 在真实游戏中验证不同地点、工具、作物、箱子、怪物和鱼竿状态机的版本兼容性。
