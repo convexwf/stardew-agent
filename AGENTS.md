@@ -45,13 +45,22 @@
   ```
 
 - ModBuildConfig 需要能够定位游戏目录或等价的参考程序集目录。如果自动探测不到游戏，使用 `-p:GamePath="<game-or-reference-assemblies-directory>"`；占位路径只在本地命令中替换，不能把本机绝对路径写进仓库文档。
-- 不需要启动游戏即可做编译验证。没有游戏安装时，使用官方 [Stardew Valley/SMAPI 参考程序集](https://github.com/StardewModders/mod-reference-assemblies/blob/main/docs/README.md)，或使用官方 [SMAPI-ModBuildWorkflow](https://github.com/Pathoschild/SMAPI-ModBuildWorkflow) 创建包含参考程序集的构建目录。例如：
+- 不需要启动游戏即可做编译验证，但必须先提供游戏目录或参考程序集。没有游戏安装时，在 `ugame` 工作区的 `temp/` 下克隆官方 [Stardew Valley/SMAPI 参考程序集](https://github.com/StardewModders/mod-reference-assemblies/blob/main/docs/README.md)：
+
+  ```bash
+  REF_DIR="../temp/mod-reference-assemblies"
+  git clone --depth 1 https://github.com/StardewModders/mod-reference-assemblies.git "$REF_DIR"
+  ```
+
+  如果目录已经存在，先执行 `git -C "$REF_DIR" pull --ff-only` 更新它；不要把参考程序集复制到本仓库或提交到 Git。然后使用该目录执行构建：
 
   ```bash
   dotnet build smapi-mod/StardewAgentMod.csproj \
     --configuration Release \
-    -p:GamePath="<reference-assemblies-directory>"
+    -p:GamePath="$REF_DIR"
   ```
+
+- 只执行不带 `GamePath` 的命令不能算完成本地 C# 编译验证；如果输出 `The mod build package can't find your game folder`，说明构建尚未进入 C# 编译阶段。必须补齐 `GamePath` 后重新执行，并确认输出为 `Build succeeded` 且 `0 Error(s)`。
 
 - 根目录的 `Directory.Build.props` 将发布压缩包输出到 `_releases/`，并关闭自动部署；构建产物不会自动安装到本机游戏目录。
 - `bin/`、`obj/` 和 `_releases/` 是构建生成物，除非任务明确要求，否则不应提交。
@@ -62,4 +71,4 @@
 - Release 对外只提供一个合并的 Windows 压缩包，其中包含 CLI 可执行文件和 SMAPI Mod 文件；job 间的 Actions artifact 仍仅用于传递和排查。
 - 参考程序集可以验证 C# 编译和 Mod 包结构，但不能证明 Mod 在真实游戏中的行为正确。涉及事件、地图、角色移动、存档或文件通信的改动，仍需在 Windows + SMAPI + Stardew Valley 中做运行验证。
 - 本地构建出现警告时要单独分类。例如 .NET 6 SDK 可能报告分析器编译器版本不匹配的 `CS9057`；只要构建结果明确为成功且无错误，就不能把该警告描述成编译失败，但也不要声称已经完成运行时验证。
-- 本地环境缺少游戏或参考程序集时，可以依靠 CI 做编译门禁；应分别报告 Rust 编译、C# 编译、打包检查和真实游戏运行验证的结果，不能用其中一项代替其他项。
+- 如果本地环境缺少游戏或参考程序集，先按上面的步骤下载参考程序集；只有本地环境确实无法配置时，才依靠 CI 做编译门禁。每次验证都应分别报告 Rust 编译、C# 编译、打包检查和真实游戏运行验证的结果，不能用其中一项代替其他项，也不能把环境准备失败描述为源码编译结果。
