@@ -22,6 +22,7 @@ internal sealed class CompanionController
     private CompanionNpc? _visual;
     private BotFarmer? _shadow;
     private ActiveMove? _activeMove;
+    private ToolActionTask? _toolAction;
     private bool _autoCombat;
     private bool _fishingActive;
     private string? _fishingRequestId;
@@ -62,6 +63,8 @@ internal sealed class CompanionController
     private const int MeleePresentationTicks = 18;
     private const int WaterPresentationTicks = 26;
     private const int CastPresentationTicks = 30;
+    private const int ToolPathTimeout = 180;
+    private const int ToolVerificationDelay = 2;
 
     private static readonly HashSet<string> SupportedModes = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -82,13 +85,14 @@ internal sealed class CompanionController
 
     public bool IsSpawned => _visual is not null && _shadow is not null;
 
-    public bool IsBusy => _activeMove is not null || _fishingActive || _autoCombat || _followActive || _modeActive || HasSpeechBubble;
+    public bool IsBusy => _activeMove is not null || _toolAction is not null || _fishingActive || _autoCombat || _followActive || _modeActive || HasSpeechBubble;
 
     public bool IsFishingActive => _fishingActive;
 
     public bool HasSpeechBubble => _visual?.HasTextAboveHead == true;
 
     public string? CurrentAction => _activeMove?.Action
+        ?? (_toolAction is not null ? "use_tool" : null)
         ?? (_fishingActive ? "cast_fishing_rod" : null)
         ?? (_modeActive ? _modeName : null)
         ?? (_followActive ? "follow" : null)
@@ -228,7 +232,7 @@ internal sealed class CompanionController
             error = new ErrorDetail { Code = "follow_target_unavailable", Message = "the player or current world is unavailable" };
             return false;
         }
-        if (_activeMove is not null || _fishingActive || _autoCombat || HasSpeechBubble || _followActive)
+        if (_activeMove is not null || _toolAction is not null || _fishingActive || _autoCombat || HasSpeechBubble || _followActive)
         {
             error = new ErrorDetail { Code = "busy", Message = "the companion is already running another action" };
             return false;
@@ -488,7 +492,7 @@ internal sealed class CompanionController
             error = new ErrorDetail { Code = "world_not_ready", Message = "the companion is not spawned" };
             return false;
         }
-        if (_activeMove is not null || _fishingActive || _autoCombat || _followActive || _modeActive || HasSpeechBubble)
+        if (_activeMove is not null || _toolAction is not null || _fishingActive || _autoCombat || _followActive || _modeActive || HasSpeechBubble)
         {
             error = new ErrorDetail { Code = "busy", Message = "the companion is already running another action" };
             return false;
@@ -522,6 +526,22 @@ internal sealed class CompanionController
             _modeBubbleCooldown--;
         SyncShadow();
 
+        if (_toolAction is not null)
+        {
+            var toolCompletion = AdvanceToolAction();
+            if (toolCompletion is null)
+                return null;
+            if (toolCompletion.Status is not ("succeeded" or "completed"))
+            {
+                PauseMode("ModeActionFailed", _modeName, toolCompletion.Error?.Message ?? "the tool action failed");
+                return null;
+            }
+
+            _modeState = "verifying";
+            _modePhaseTicks = 0;
+            return null;
+        }
+
         if (_modeState == "paused")
         {
             _modePhaseTicks++;
@@ -548,6 +568,7 @@ internal sealed class CompanionController
         if (!_modeActive || _modeRequestId is null)
             return null;
 
+        CancelToolActionInternal();
         if (_fishingActive)
         {
             _fishingActive = false;
@@ -564,7 +585,7 @@ internal sealed class CompanionController
         {
             Id = _modeName,
             State = _modeState,
-            TargetTile = _modeState is "moving" or "acting" or "verifying" or "fishing"
+            TargetTile = _modeState is "moving" or "acting" or "tool_action" or "verifying" or "fishing"
                 ? new TileDto { X = _modeTargetTile.X, Y = _modeTargetTile.Y }
                 : null,
             CompletedCount = _modeCompletedCount,
@@ -598,6 +619,15 @@ internal sealed class CompanionController
             return null;
 
         _modeTargetTile = target.Value;
+        if (IsToolMode())
+        {
+            _modeRetries = 0;
+            _modeBlockedTicks = 0;
+            _modePhaseTicks = 0;
+            _modeState = "acting";
+            return null;
+        }
+
         _modePathTile = FindModeApproachTile(_visual.currentLocation, _modeTargetTile) ?? Point.Zero;
         if (_modePathTile == Point.Zero)
         {
@@ -666,11 +696,11 @@ internal sealed class CompanionController
         ErrorDetail? error = null;
         var success = _modeName switch
         {
-            "chop_trees" => TryUseModeTool(typeof(Axe), out error),
-            "water_crops" => TryUseModeTool(typeof(WateringCan), out error),
+            "chop_trees" => TryStartModeTool("axe", typeof(Axe), out error),
+            "water_crops" => TryStartModeTool("watering_can", typeof(WateringCan), out error),
             "harvest_crops" => TryHarvestModeCrop(out error),
             "plant_crops" => TryPlantModeCrop(out error),
-            "mine" => TryUseModeTool(typeof(Pickaxe), out error),
+            "mine" => TryStartModeTool("pickaxe", typeof(Pickaxe), out error),
             "fish" => TryStartModeFishing(out error),
             _ => false
         };
@@ -685,9 +715,14 @@ internal sealed class CompanionController
             _modeState = "fishing";
             _modePhaseTicks = 0;
         }
-        else
+        else if (!IsToolMode())
         {
             _modeState = "verifying";
+            _modePhaseTicks = 0;
+        }
+        else
+        {
+            _modeState = "tool_action";
             _modePhaseTicks = 0;
         }
         return null;
@@ -888,17 +923,46 @@ internal sealed class CompanionController
         return null;
     }
 
-    private bool TryUseModeTool(Type toolType, out ErrorDetail? error)
+    private bool TryStartModeTool(string toolName, Type toolType, out ErrorDetail? error)
     {
         error = null;
-        if (_modeName == "chop_trees" && GetTreeAt(_modeTargetTile) is Tree treeBefore)
-            _modeBeforeHealth = treeBefore.health.Value;
-        if (!UseToolAt(_modeRequestId ?? "unknown", new Vector2(_modeTargetTile.X, _modeTargetTile.Y), toolType))
+        if (_visual?.currentLocation is null || _shadow is null || _modeRequestId is null)
         {
-            error = new ErrorDetail { Code = "tool_use_failed", Message = $"failed to use {toolType.Name} at the target" };
+            error = new ErrorDetail { Code = "world_not_ready", Message = "the companion is not available" };
             return false;
         }
+
+        if (_toolAction is not null)
+        {
+            error = new ErrorDetail { Code = "busy", Message = "another tool action is already active" };
+            return false;
+        }
+
+        var tool = FindToolByType(toolType);
+        if (tool is null)
+        {
+            error = new ErrorDetail { Code = "missing_tool", Message = $"the companion has no {toolName}" };
+            return false;
+        }
+
+        if (_modeName == "chop_trees" && GetTreeAt(_modeTargetTile) is Tree treeBefore)
+            _modeBeforeHealth = treeBefore.health.Value;
+
+        var task = new ToolActionTask(
+            _modeRequestId,
+            toolName,
+            toolType,
+            _modeTargetTile,
+            ReadTile(),
+            _visual.currentLocation,
+            ownedByMode: true);
+        _toolAction = task;
         return true;
+    }
+
+    private bool IsToolMode()
+    {
+        return _modeName is "chop_trees" or "water_crops" or "mine";
     }
 
     private bool TryHarvestModeCrop(out ErrorDetail? error)
@@ -1001,6 +1065,11 @@ internal sealed class CompanionController
         return _shadow?.Items.FirstOrDefault(item => item is T) as T;
     }
 
+    private Tool? FindToolByType(Type toolType)
+    {
+        return _shadow?.Items.FirstOrDefault(item => item is not null && toolType.IsInstanceOfType(item)) as Tool;
+    }
+
     private int FindSeedSlot()
     {
         if (_shadow is null)
@@ -1090,6 +1159,7 @@ internal sealed class CompanionController
     {
         if (_visual is not null)
             _visual.controller = null;
+        CancelToolActionInternal();
         ClearActionPresentation();
         _fishingActive = false;
         _fishingRequestId = null;
@@ -1149,6 +1219,22 @@ internal sealed class CompanionController
         _activeMove = null;
         _visual.controller = null;
         return MoveCompletion.Failed(active.RequestId, active.Action, active.Direction, active.Ticks, code, message, "cancelled");
+    }
+
+    public ActionCompletion? TickToolAction()
+    {
+        if (_toolAction is null || _toolAction.OwnedByMode)
+            return null;
+        return AdvanceToolAction();
+    }
+
+    public ActionCompletion? CancelToolAction(string code, string message)
+    {
+        if (_toolAction is null || _toolAction.OwnedByMode)
+            return null;
+
+        var task = _toolAction;
+        return CompleteToolAction(task, "cancelled", code, message);
     }
 
     public ActionCompletion? TickFishingAction()
@@ -1239,18 +1325,19 @@ internal sealed class CompanionController
             return false;
         }
 
-        _visual!.FacingDirection = offset switch
+        var facing = offset switch
         {
             { X: 0, Y: -1 } => 0,
             { X: 1, Y: 0 } => 1,
             { X: 0, Y: 1 } => 2,
             _ => 3
         };
+        SetFacingDirection(facing);
         SyncShadow();
         return true;
     }
 
-    public bool TryUseTool(string requestId, string toolName, int x, int y, out object? data, out ErrorDetail? error)
+    public bool TryStartUseTool(string requestId, string toolName, int x, int y, out object? data, out ErrorDetail? error)
     {
         data = null;
         error = null;
@@ -1260,13 +1347,19 @@ internal sealed class CompanionController
             return false;
         }
 
-        var toolType = (toolName ?? "").ToLowerInvariant() switch
+        var normalizedTool = (toolName ?? "").Trim().ToLowerInvariant() switch
+        {
+            "wateringcan" => "watering_can",
+            "weapon" => "sword",
+            var value => value
+        };
+        var toolType = normalizedTool switch
         {
             "pickaxe" => typeof(Pickaxe),
             "axe" => typeof(Axe),
             "hoe" => typeof(Hoe),
-            "watering_can" or "wateringcan" => typeof(WateringCan),
-            "sword" or "weapon" => typeof(MeleeWeapon),
+            "watering_can" => typeof(WateringCan),
+            "sword" => typeof(MeleeWeapon),
             _ => null
         };
         if (toolType is null)
@@ -1275,14 +1368,39 @@ internal sealed class CompanionController
             return false;
         }
 
-        var success = UseToolAt(requestId, new Vector2(x, y), toolType);
-        data = new { tool = toolName, tile = new TileDto { X = x, Y = y }, used = success };
-        if (!success)
+        if (_shadow is null || _visual?.currentLocation is null)
         {
-            ClearActionPresentation();
-            error = new ErrorDetail { Code = "tool_use_failed", Message = $"failed to use {toolName} at ({x},{y})" };
+            error = new ErrorDetail { Code = "world_not_ready", Message = "the companion is not spawned" };
+            return false;
         }
-        return success;
+        if (FindToolByType(toolType) is null)
+        {
+            error = new ErrorDetail { Code = "missing_tool", Message = $"the companion has no {normalizedTool}" };
+            return false;
+        }
+        if (_shadow.Stamina <= 0)
+        {
+            error = new ErrorDetail { Code = "low_stamina", Message = "the companion has no stamina" };
+            return false;
+        }
+
+        var task = new ToolActionTask(
+            requestId,
+            normalizedTool,
+            toolType,
+            new Point(x, y),
+            ReadTile(),
+            _visual.currentLocation,
+            ownedByMode: false);
+        _toolAction = task;
+        data = new
+        {
+            tool = normalizedTool,
+            target_tile = new TileDto { X = x, Y = y },
+            phase = task.PhaseName,
+            accepted = true
+        };
+        return true;
     }
 
     public bool TryInteract(int x, int y, out object? data, out ErrorDetail? error)
@@ -1381,9 +1499,9 @@ internal sealed class CompanionController
             error = failure?.Error;
             return false;
         }
-        if (_activeMove is not null)
+        if (_activeMove is not null || _toolAction is not null)
         {
-            error = new ErrorDetail { Code = "busy", Message = "the companion is currently moving" };
+            error = new ErrorDetail { Code = "busy", Message = "the companion is currently busy" };
             return false;
         }
 
@@ -1598,8 +1716,15 @@ internal sealed class CompanionController
             InventoryCount = inventory.Count,
             Inventory = inventory,
             Mode = _modeActive ? _modeName! : _followActive ? "follow" : "direct",
-            Status = _modeActive ? _modeState : _activeMove is not null ? "moving" : _fishingActive ? "fishing" : _followActive ? "following" : _autoCombat ? "auto-combat" : HasSpeechBubble ? "bubble" : "idle",
+            Status = _modeActive ? _modeState : _activeMove is not null ? "moving" : _toolAction?.PhaseName ?? (_fishingActive ? "fishing" : _followActive ? "following" : _autoCombat ? "auto-combat" : HasSpeechBubble ? "bubble" : "idle"),
             CurrentAction = CurrentAction,
+            ActionPhase = _toolAction?.PhaseName,
+            TargetTile = _toolAction is null ? null : new TileDto { X = _toolAction.TargetTile.X, Y = _toolAction.TargetTile.Y },
+            ApproachTile = _toolAction?.ApproachTile is Point approach
+                ? new TileDto { X = approach.X, Y = approach.Y }
+                : null,
+            Tool = _toolAction?.ToolName,
+            ActionRequestId = _toolAction?.RequestId,
             WorldReady = Context.IsWorldReady && IsSpawned,
             Busy = IsBusy,
             AutoCombat = _autoCombat,
@@ -1622,6 +1747,7 @@ internal sealed class CompanionController
     public void WakeUp()
     {
         _shadow?.WakeUp();
+        CancelToolActionInternal();
         ClearActionPresentation();
         _fishingActive = false;
         _fishingRequestId = null;
@@ -1633,6 +1759,7 @@ internal sealed class CompanionController
     {
         CancelMove();
         _visual?.ClearTextAboveHead();
+        CancelToolActionInternal();
         ClearActionPresentation();
         if (_visual is not null)
             _visual.currentLocation?.characters.Remove(_visual);
@@ -1663,6 +1790,11 @@ internal sealed class CompanionController
         if (_activeMove is not null)
         {
             failure = MoveCompletion.Failed(requestId, action, direction, ticks, "busy", "the companion is already moving");
+            return false;
+        }
+        if (_toolAction is not null)
+        {
+            failure = MoveCompletion.Failed(requestId, action, direction, ticks, "busy", "the companion is using a tool");
             return false;
         }
         return true;
@@ -1707,39 +1839,242 @@ internal sealed class CompanionController
         return offset.X != int.MinValue;
     }
 
-    private bool UseToolAt(string requestId, Vector2 tile, Type toolType)
+    private ActionCompletion? AdvanceToolAction()
     {
-        if (_shadow is null || _shadow.Stamina <= 0)
-            return false;
-        var tool = _shadow.Items.FirstOrDefault(item => item is not null && toolType.IsInstanceOfType(item)) as Tool;
-        if (tool is null || _shadow.currentLocation is null)
-            return false;
+        if (_toolAction is null)
+            return null;
 
-        _shadow.FaceToward(tile);
-        var oldStamina = _shadow.Stamina;
+        var task = _toolAction;
+        if (!Context.IsWorldReady || _visual is null || _shadow is null || _visual.currentLocation is null)
+            return CompleteToolAction(task, "failed", "world_not_ready", "the companion or world is unavailable");
+        if (!ReferenceEquals(_visual.currentLocation, task.Location))
+            return CompleteToolAction(task, "failed", "location_changed", "the companion changed location during the tool action");
+
+        task.ElapsedTicks++;
+        switch (task.Phase)
+        {
+            case ToolActionPhase.Validating:
+                return AdvanceToolValidation(task);
+            case ToolActionPhase.Locating:
+                return AdvanceToolLocating(task);
+            case ToolActionPhase.Moving:
+                return AdvanceToolMovement(task);
+            case ToolActionPhase.Facing:
+                return AdvanceToolFacing(task);
+            case ToolActionPhase.Executing:
+                return AdvanceToolExecution(task);
+            case ToolActionPhase.Verifying:
+                return AdvanceToolVerification(task);
+            default:
+                return CompleteToolAction(task, "failed", "invalid_tool_phase", "the tool action entered an invalid phase");
+        }
+    }
+
+    private ActionCompletion? AdvanceToolValidation(ToolActionTask task)
+    {
+        if (_shadow is null || _visual?.currentLocation is null)
+            return CompleteToolAction(task, "failed", "world_not_ready", "the companion is not available");
+        if (FindToolByType(task.ToolType) is null)
+            return CompleteToolAction(task, "failed", "missing_tool", $"the companion has no {task.ToolName}");
+        if (_shadow.Stamina <= 0)
+            return CompleteToolAction(task, "failed", "low_stamina", "the companion has no stamina");
+        if (!IsToolTargetValid(task))
+            return CompleteToolAction(task, "failed", "invalid_tool_target", $"the target is not valid for {task.ToolName}");
+
+        if (task.ToolType == typeof(Axe) && GetTreeAt(task.TargetTile) is Tree tree)
+            task.BeforeTreeHealth = tree.health.Value;
+        if (task.ToolType == typeof(Pickaxe)
+            && _visual.currentLocation.objects.TryGetValue(new Vector2(task.TargetTile.X, task.TargetTile.Y), out var targetObject))
+            task.BeforeBreakableStone = targetObject.IsBreakableStone();
+
+        task.Phase = ToolActionPhase.Locating;
+        task.PhaseTicks = 0;
+        return null;
+    }
+
+    private ActionCompletion? AdvanceToolLocating(ToolActionTask task)
+    {
+        if (_visual is null || _visual.currentLocation is null)
+            return CompleteToolAction(task, "failed", "world_not_ready", "the companion is not available");
+
+        var current = ToPoint(ReadTile());
+        if (!ToolTargetResolver.TryFindApproach(_visual.currentLocation, task.TargetTile, current, out var approach))
+            return CompleteToolAction(task, "blocked", "no_approach_tile", "no reachable passable tile was found beside the target");
+
+        task.ApproachTile = approach.Tile;
+        task.FacingDirection = approach.FacingDirection;
+        task.PhaseTicks = 0;
+        if (current == approach.Tile)
+        {
+            task.Phase = ToolActionPhase.Facing;
+            return null;
+        }
+
         try
         {
-            if (tool is MeleeWeapon weapon)
-            {
-                var toolLocation = _shadow.GetToolLocation(true);
-                weapon.DoDamage(_shadow.currentLocation, (int)toolLocation.X, (int)toolLocation.Y, _shadow.FacingDirection, 1, _shadow);
-                StartToolPresentation(requestId, weapon, tile, CompanionNpc.MeleePresentation);
-            }
-            else
-            {
-                tool.DoFunction(_shadow.currentLocation, (int)(tile.X * Game1.tileSize), (int)(tile.Y * Game1.tileSize), 1, _shadow);
-                var kind = tool is WateringCan ? CompanionNpc.WaterPresentation : CompanionNpc.SwingPresentation;
-                StartToolPresentation(requestId, tool, tile, kind);
-            }
-            _shadow.checkForExhaustion(oldStamina);
-            return true;
+            _visual.controller = new PathFindController(_visual, _visual.currentLocation, approach.Tile, 2);
+            task.Phase = ToolActionPhase.Moving;
+            return null;
         }
-        catch (Exception error)
+        catch (Exception exception)
         {
-            _monitor.Log($"Tool use failed: {error.Message}", LogLevel.Debug);
-            ClearActionPresentation();
-            return false;
+            _monitor.Log($"Tool target pathfinding failed: {exception.Message}", LogLevel.Debug);
+            return CompleteToolAction(task, "blocked", "pathfinding_failed", exception.Message);
         }
+    }
+
+    private ActionCompletion? AdvanceToolMovement(ToolActionTask task)
+    {
+        if (_visual is null || task.ApproachTile is null)
+            return CompleteToolAction(task, "failed", "world_not_ready", "the tool approach is unavailable");
+
+        var current = ToPoint(ReadTile());
+        if (current == task.ApproachTile.Value)
+        {
+            _visual.controller = null;
+            task.Phase = ToolActionPhase.Facing;
+            task.PhaseTicks = 0;
+            return null;
+        }
+
+        task.PhaseTicks++;
+        if (task.PhaseTicks > ToolPathTimeout)
+            return CompleteToolAction(task, "blocked", "pathfinding_timeout", "the companion did not reach the approach tile");
+        if (_visual.controller is null && task.PhaseTicks > 2)
+            return CompleteToolAction(task, "blocked", "path_ended", "the companion path ended before reaching the approach tile");
+        return null;
+    }
+
+    private ActionCompletion? AdvanceToolFacing(ToolActionTask task)
+    {
+        if (_visual is null || _shadow is null)
+            return CompleteToolAction(task, "failed", "world_not_ready", "the companion is not available");
+
+        SetFacingDirection(task.FacingDirection);
+        SyncShadow();
+        task.PhaseTicks++;
+        if (task.PhaseTicks < 1)
+            return null;
+
+        task.Phase = ToolActionPhase.Executing;
+        task.PhaseTicks = 0;
+        return null;
+    }
+
+    private ActionCompletion? AdvanceToolExecution(ToolActionTask task)
+    {
+        if (_shadow is null || _visual?.currentLocation is null)
+            return CompleteToolAction(task, "failed", "world_not_ready", "the companion is not available");
+
+        var tool = FindToolByType(task.ToolType);
+        if (tool is null)
+            return CompleteToolAction(task, "failed", "missing_tool", $"the companion no longer has {task.ToolName}");
+        if (_shadow.Stamina <= 0)
+            return CompleteToolAction(task, "failed", "low_stamina", "the companion has no stamina");
+
+        SetFacingDirection(task.FacingDirection);
+        SyncShadow();
+        var oldStamina = _shadow.Stamina;
+        task.ApiCalled = true;
+        try
+        {
+            var target = new Vector2(task.TargetTile.X, task.TargetTile.Y);
+            var kind = tool is MeleeWeapon
+                ? CompanionNpc.MeleePresentation
+                : tool is WateringCan ? CompanionNpc.WaterPresentation : CompanionNpc.SwingPresentation;
+            StartToolPresentation(task.RequestId, tool, target, kind);
+
+            ToolExecutor.Execute(tool, _shadow.currentLocation, task.TargetTile, _shadow);
+
+            _shadow.checkForExhaustion(oldStamina);
+            task.Phase = ToolActionPhase.Verifying;
+            task.PhaseTicks = 0;
+            return null;
+        }
+        catch (Exception exception)
+        {
+            _monitor.Log($"Tool use failed: {exception.Message}", LogLevel.Debug);
+            return CompleteToolAction(task, "failed", "tool_use_failed", exception.Message);
+        }
+    }
+
+    private ActionCompletion? AdvanceToolVerification(ToolActionTask task)
+    {
+        task.PhaseTicks++;
+        if (task.PhaseTicks < ToolVerificationDelay)
+            return null;
+
+        if (ToolVerifier.TryVerify(task, _visual!.currentLocation!, out var verification, out var contradicted))
+            return CompleteToolAction(task, "succeeded", verification, null);
+        if (contradicted)
+            return CompleteToolAction(task, "failed", "verification_failed", verification);
+        return CompleteToolAction(task, "completed", "api_returned", null);
+    }
+
+    private bool IsToolTargetValid(ToolActionTask task)
+    {
+        if (_visual?.currentLocation is null)
+            return false;
+        if (task.TargetTile.X < 0 || task.TargetTile.Y < 0)
+            return false;
+        if (task.ToolType == typeof(WateringCan))
+        {
+            return _visual.currentLocation.terrainFeatures.TryGetValue(
+                new Vector2(task.TargetTile.X, task.TargetTile.Y),
+                out var feature)
+                && feature is HoeDirt;
+        }
+        return true;
+    }
+
+    private ActionCompletion CompleteToolAction(
+        ToolActionTask task,
+        string status,
+        string verification,
+        string? message)
+    {
+        task.Verification = verification;
+        var after = ReadTile();
+        var data = new
+        {
+            tool = task.ToolName,
+            target_tile = new TileDto { X = task.TargetTile.X, Y = task.TargetTile.Y },
+            approach_tile = task.ApproachTile is Point approach
+                ? new TileDto { X = approach.X, Y = approach.Y }
+                : null,
+            before_tile = task.BeforeTile,
+            after_tile = after,
+            facing_direction = FacingName(task.FacingDirection),
+            phase = task.PhaseName,
+            api_called = task.ApiCalled,
+            verification
+        };
+        if (status is not ("succeeded" or "completed"))
+            ClearActionPresentation();
+        ClearToolActionState();
+        return new ActionCompletion
+        {
+            RequestId = task.RequestId,
+            Action = "use_tool",
+            Status = status,
+            Data = data,
+            Error = message is null ? null : new ErrorDetail { Code = verification, Message = message }
+        };
+    }
+
+    private void ClearToolActionState()
+    {
+        if (_visual is not null)
+            _visual.controller = null;
+        _toolAction = null;
+    }
+
+    private void CancelToolActionInternal()
+    {
+        if (_toolAction is null)
+            return;
+        ClearActionPresentation();
+        ClearToolActionState();
     }
 
     private void StartToolPresentation(string requestId, Tool tool, Vector2 targetTile, string kind)
@@ -1845,6 +2180,14 @@ internal sealed class CompanionController
         _shadow.FacingDirection = _visual.FacingDirection;
     }
 
+    private void SetFacingDirection(int direction)
+    {
+        if (_visual is null)
+            return;
+        _visual.FacingDirection = direction;
+        _visual.Sprite?.StopAnimation();
+    }
+
     private TileDto ReadTile()
     {
         return new TileDto
@@ -1852,6 +2195,11 @@ internal sealed class CompanionController
             X = (int)(_visual?.Tile.X ?? 0),
             Y = (int)(_visual?.Tile.Y ?? 0)
         };
+    }
+
+    private static Point ToPoint(TileDto tile)
+    {
+        return new Point(tile.X, tile.Y);
     }
 
     private static string FacingName(int direction)

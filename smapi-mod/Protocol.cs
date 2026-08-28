@@ -390,6 +390,26 @@ internal sealed class CompanionInfo
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? CurrentAction { get; set; }
 
+    [JsonPropertyName("action_phase")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ActionPhase { get; set; }
+
+    [JsonPropertyName("target_tile")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public TileDto? TargetTile { get; set; }
+
+    [JsonPropertyName("approach_tile")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public TileDto? ApproachTile { get; set; }
+
+    [JsonPropertyName("tool")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Tool { get; set; }
+
+    [JsonPropertyName("action_request_id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ActionRequestId { get; set; }
+
     [JsonPropertyName("world_ready")]
     public bool WorldReady { get; set; }
 

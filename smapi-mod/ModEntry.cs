@@ -104,6 +104,7 @@ internal sealed class ModEntry : Mod
 
         ProcessPendingCancellationRequests();
         FinishMoveIfReady(_moveExecutor?.Tick());
+        FinishActionIfReady(_companion?.IsModeActive == true ? null : _companion?.TickToolAction());
         FinishActionIfReady(_companion?.TickFollow());
         FinishActionIfReady(_companion?.TickAutonomousMode());
         FinishActionIfReady(_companion?.IsModeActive == true ? null : _companion?.TickFishingAction());
@@ -459,9 +460,16 @@ internal sealed class ModEntry : Mod
         }
         object? data = null;
         ErrorDetail? error = null;
-        var success = _companion is not null && _companion.TryUseTool(request.RequestId!, payload.Tool, payload.X, payload.Y, out data, out error);
-        WriteActionResult(request.RequestId!, "use_tool", actorId, success, data, error);
-        Archive(processingPath);
+        var started = _companion is not null
+            && _companion.TryStartUseTool(request.RequestId!, payload.Tool, payload.X, payload.Y, out data, out error);
+        if (!started)
+        {
+            WriteActionResult(request.RequestId!, "use_tool", actorId, false, data, error);
+            Archive(processingPath);
+            return;
+        }
+
+        _activeAction = new ActiveAction(request.RequestId!, "use_tool", processingPath, actorId, data);
     }
 
     private void ExecuteInteract(Envelope<JsonElement> request, string processingPath)
@@ -860,7 +868,7 @@ internal sealed class ModEntry : Mod
             completion.RequestId,
             completion.Action,
             _activeAction.ActorId,
-            completion.Status == "succeeded",
+            completion.Status is "succeeded" or "completed",
             completion.Data,
             completion.Error,
             completion.Status);
@@ -890,6 +898,9 @@ internal sealed class ModEntry : Mod
                 return moveCompletion is not null;
             case "cast_fishing_rod":
                 FinishActionIfReady(_companion?.CancelFishing(code, message));
+                return true;
+            case "use_tool":
+                FinishActionIfReady(_companion?.CancelToolAction(code, message));
                 return true;
             case "bubble":
                 _companion?.ClearSpeechBubble();

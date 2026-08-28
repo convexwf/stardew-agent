@@ -1036,6 +1036,7 @@ Mod 项目目标框架为 `net6.0`。Mac 可以安装 .NET SDK 编译 C# 工程�
 - [x] Mod 在逐 Tick 状态机中执行持续模式，并在快照中暴露模式状态、目标和完成数量；
 - [x] 持续模式支持工具、种子、水量、体力和背包前置检查、官方气泡通知、有限重试和统一 cancel 清理；
 - [ ] Windows + SMAPI 真实游戏中验证 follow 的同地图寻路、跨地图 warp、路径阻塞和取消；
-- [ ] 完成 [use-tool 动作设计](use-tool-design.md#实施检查项)中的工具动作实现和 Windows + SMAPI 验证；
+- [x] 按 [use-tool 动作设计](use-tool-design.md#实施检查项)实现工具动作任务、执行器、验证器和持续模式复用；
+- [ ] 在 Windows + SMAPI 中完成 [use-tool 动作设计](use-tool-design.md#实施检查项)中的真实游戏验证；
 - [ ] 在真实游戏中验证不同地点、工具、作物、箱子、怪物和鱼竿状态机的版本兼容性；
 - [ ] 扩展 `mine` 的入口、梯子、战斗和安全停止策略，并增加有界 Runtime 参数。
