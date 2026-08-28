@@ -5,9 +5,9 @@
 | 项目 | 内容 |
 | --- | --- |
 | **文档标题** | CLI 工具系统通信 Demo 技术实现方案 |
-| **文档版本** | v0.22 |
+| **文档版本** | v0.23 |
 | **创建日期** | 2026-08-23 |
-| **更新日期** | 2026-08-27 |
+| **更新日期** | 2026-08-28 |
 | **文档类型** | 技术实现方案 |
 | **参考资料** | [SMAPI Mod 结构](https://wiki.stardewvalley.net/Modding:Modder_Guide/APIs/Mod_structure)、[SMAPI Mod package](https://github.com/Pathoschild/SMAPI/blob/develop/docs/technical/mod-package.md)、[StardewMCP](https://github.com/Hunter-Thompson/stardew-mcp/tree/3ca54bbfc1d446eeb06d822a74c92cd14df82b93)、[StardewValley-MCP](https://github.com/amarisaster/StardewValley-MCP) |
 
@@ -93,7 +93,7 @@ Companion 的逻辑名称固定为 `companion-1`，这个名称同时用于 CLI 
 
 `use_tool`、`attack` 和 `cast_fishing_rod` 的命令入口已经实现，但实际是否成功取决于 Companion Shadow Farmer 当前是否拥有相应工具、目标是否存在以及游戏运行时前置条件。失败会通过结构化 `error` 返回，不会伪造成功。
 
-工具动作的游戏效果和可见表现已经实现：Shadow Farmer 负责真实游戏副作用，Companion 按[工具动作表现方案](#工具动作表现方案)播放无素材的近似挥动、水流、命中和抛竿特效。表现只负责画面，不改变动作结果语义。
+工具动作的游戏效果和可见表现由两层组成：Shadow Farmer 负责真实游戏副作用，Companion 负责位置、朝向和画面表现。`use_tool` 的目标 tile、相邻站位、异步状态机、取消边界、结果验证和持续模式复用关系，以[use-tool 动作设计与持续模式执行基座](use-tool-design.md)为准；本页的[工具动作表现方案](#工具动作表现方案)只记录当前 demo 的表现范围。
 
 ## 命令同步异步语义
 
@@ -306,7 +306,7 @@ Fake Mod 已验证 follow 请求的字段、异步受理、pending 状态和 can
 
 ## 持续模式扩展
 
-本节描述在 `follow` 之外的游戏侧持续模式及其当前实现。持续模式由 SMAPI Mod 在游戏线程中维护，CLI 或 Agent Runtime 只负责启动、查询和取消，不通过外部循环反复提交低级 `move_to` 或 `use_tool`。
+本节描述在 `follow` 之外的游戏侧持续模式及其当前实现。持续模式由 SMAPI Mod 在游戏线程中维护，CLI 或 Agent Runtime 只负责启动、查询和取消，不通过外部循环反复提交低级 `move_to` 或 `use_tool`。工具型持续模式应复用[use-tool 动作设计与持续模式执行基座](use-tool-design.md)中的目标解析、相邻站位、朝向、执行、验证和取消逻辑。
 
 每个持续模式都持有一个 actor lease。单个 `companion-1` 同时只能运行一个持续模式或 foreground action；模式启动后异步返回 request ID，并在运行期间通过快照暴露当前状态，直到完成、失败、取消或被新的计划取代才写入终态结果。模式处于 `paused` 或 `waiting` 时保留活动状态，等待资源补充、环境变化或后续控制请求。
 
